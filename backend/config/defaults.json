@@ -1,0 +1,22 @@
+{
+  "default_assistant": {
+    "name": "Rhasspy Assistant",
+    "instructions": "You are Rhasspy, a helpful AI assistant for voice conversations.\n\nGuidelines:\n- Be concise and natural in speech\n- Answer directly without unnecessary elaboration\n- Use simple, clear language suitable for voice\n- Keep responses under 3 sentences unless more detail is requested\n- No greetings or sign-offs in middle of conversation\n- For Indian English: understand common phrases like \"doing the needful\", \"prepone\", \"out of station\"",
+    "model": "gpt-4.1-mini"
+  },
+  "audio": {
+    "stt_model": "whisper-1",
+    "tts_model": "tts-1",
+    "voice": "nova",
+    "stt_prompts": {
+      "en-IN": "Indian English conversation with common names like Ravi, Priya, Suresh, Amit, Deepa, Rajesh, Anita, Vikram, Meera. Common phrases include doing the needful, prepone, revert back, out of station, good name. Technical terms like API, database, server, application.",
+      "hi": "हिंदी वार्तालाप सामान्य नामों के साथ जैसे रवि, प्रिया, सुरेश, अमित, दीपा।",
+      "en": "English conversation with clear pronunciation.",
+      "fr": "Conversation française avec prononciation claire.",
+      "es": "Conversación en español con pronunciación clara.",
+      "ja": "日本語の会話、明瞭な発音。",
+      "zh": "中文对话，发音清晰。"
+    }
+  }
+}
+

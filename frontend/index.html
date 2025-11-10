@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%23BD120A'/%3E%3Cpath d='M10.5 22.5l5.5-13 5.5 13h-2.9l-0.9-2.2h-3.4l-0.9 2.2h-2.9zm5-6.1h1.9l-1-2.6-0.9 2.6z' fill='%23fff'/%3E%3C/svg%3E">
+    <title>Rhasspy - AI Avatar Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=1762718750">
+</head>
+<body>
+    <div class="heygen-container">
+        <!-- Left Side: Avatar Display -->
+        <div class="avatar-section">
+            <canvas id="avatar-canvas"></canvas>
+            
+            <!-- Top-left Overlay: Time Remaining -->
+            <div class="time-badge">
+                <span id="time-remaining">Time remaining 10:00</span>
+            </div>
+            
+            <!-- Top-right Overlay: Settings/Notes -->
+            <button class="top-right-btn" id="settings-btn" title="Settings">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="12" x2="21" y2="12"></line>
+                    <line x1="3" y1="6" x2="21" y2="6"></line>
+                    <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
+            </button>
+            
+            <!-- Bottom Controls -->
+            <div class="bottom-controls">
+                <div class="control-group">
+                    <button class="control-btn" id="menu-btn" title="Select Language">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="18 15 12 9 6 15"></polyline>
+                        </svg>
+                    </button>
+                    <!-- Language Selector Dropdown -->
+                    <div class="language-dropdown" id="language-dropdown">
+                        <div class="language-option" data-lang="en-IN">English (Indian)</div>
+                        <div class="language-option" data-lang="fr">French</div>
+                        <div class="language-option" data-lang="es">Spanish</div>
+                        <div class="language-option" data-lang="ja">Japanese</div>
+                        <div class="language-option" data-lang="zh">Chinese</div>
+                    </div>
+                    <button class="control-btn mute-btn" id="mute-btn" title="Mute">
+                        <svg class="mic-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                        </svg>
+                        <svg class="mic-muted-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display: none;">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                            <line x1="23" y1="9" x2="17" y2="15"></line>
+                            <line x1="17" y1="9" x2="23" y2="15"></line>
+                        </svg>
+                    </button>
+                </div>
+                
+                <button class="end-call-btn rhasspy-start-btn" id="rhasspy-start-btn" title="Start Conversation">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                    </svg>
+                    <span class="end-call-label">Rhasspy</span>
+                </button>
+                
+                <div class="control-group">
+                    <button class="control-btn" id="chat-mode-btn" title="Toggle Chat Panel">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="21" y1="15" x2="3" y2="15"></line>
+                            <polyline points="17 8 11 3 5 8"></polyline>
+                        </svg>
+                    </button>
+                    <button class="control-btn status-btn" id="status-btn" title="Current Status">
+                        <span id="status-btn-text">Ready</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Side: Chat Panel -->
+        <div class="chat-section">
+            <!-- Chat Header -->
+            <div class="chat-header">
+                <div class="chat-header-content">
+                    <h2>Chatting with Rhasspy</h2>
+                </div>
+                <button class="close-btn btn-icon-circle ghost medium" id="close-chat-btn" title="Close Chat">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            
+            <!-- Chat Messages Area -->
+                <div id="chat-messages" class="chat-messages"></div>
+                
+            <!-- Chat Input -->
+            <div class="chat-input-container">
+                    <div class="input-wrapper">
+                    <input 
+                        type="text" 
+                            id="chat-input" 
+                        placeholder="Send me message..."
+                        autocomplete="off"
+                    />
+                    <!-- Voice Button (inside input wrapper) -->
+                    <button id="voice-btn" class="voice-btn" title="Click to speak">
+                            <!-- Microphone Icon (default) -->
+                            <svg id="mic-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                            </svg>
+                            <!-- Send Arrow Icon (when recording) - Up arrow to send -->
+                            <svg id="send-arrow-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display: none;">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <polyline points="8 12 12 8 16 12"></polyline>
+                                <line x1="12" y1="8" x2="12" y2="16"></line>
+                            </svg>
+                        </button>
+                    <!-- Recording Indicator -->
+                    <div id="recording-indicator" class="recording-indicator" style="display: none;">
+                        <span class="recording-dot"></span>
+                        <span class="recording-text">Speak now...</span>
+                    </div>
+                    <!-- Send Button -->
+                    <button id="send-btn" class="send-btn" title="Send message">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Markdown rendering library -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/live2d-widget@3.1.4/lib/L2Dwidget.min.js"></script>
+    <script src="ui-controller.js?v=1762718750"></script>
+    <script src="message-processor.js?v=1762718750"></script>
+    <script src="avatar.js?v=1762718750"></script>
+    <script src="chat.js?v=1762718750"></script>
+    <script src="manual-mode-controller.js?v=1762718750"></script>
+    <script src="rhasspy-mode-controller.js?v=1762718750"></script>
+    <script src="audio.js?v=1762718750"></script>
+    <script src="assistant-manager.js?v=1762718750"></script>
+    <script src="settings.js?v=1762718750"></script>
+    <script src="app.js?v=1762718750"></script>
+</body>
+</html>
