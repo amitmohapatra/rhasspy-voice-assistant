@@ -15,6 +15,10 @@ class SettingsPanel {
         this.currentTab = 'assistants';
         this.selectedVectorStore = null;
         this.logPrefix = '[SettingsPanel]';
+        this.isBusy = false; // Prevent concurrent operations
+        this.busyOperation = null; // Track current operation
+        this.currentReasoningEffort = 'auto';
+        this.currentAssistantModel = null;
         
         SettingsPanel.instance = this;
     }
@@ -109,6 +113,8 @@ class SettingsPanel {
         
         button.append(iconWrapper, labelSpan);
         button.addEventListener('click', (event) => {
+            const stamp = new Date().toISOString();
+            console.log(`🔘 ${this.logPrefix} Button clicked @ ${stamp}: ${label} (${iconName}) [settings.js]`);
             event.preventDefault();
             event.stopPropagation();
             handler(event);
@@ -137,7 +143,7 @@ class SettingsPanel {
                         <p id="confirm-message"></p>
                     </div>
                     <div class="modal-actions">
-                        <button class="btn btn-ghost" onclick="settingsPanel.hideConfirmModal()">Cancel</button>
+                        <button class="btn btn-ghost" onclick="settingsPanel.hideConfirmModal(true)">Cancel</button>
                         <button class="btn btn-primary" id="confirm-yes">Confirm</button>
                     </div>
                 </div>
@@ -196,11 +202,42 @@ class SettingsPanel {
                                 <option value="o1">o1</option>
                                 <option value="o3-mini">o3-mini</option>
                             </select>
+                            <p class="field-hint">Reasoning models (o1, o3-mini) only support Deep Search &amp; file tools.</p>
                         </div>
-                        
+
+                        <div class="form-field" id="modal-assistant-reasoning-wrapper">
+                            <label for="modal-assistant-reasoning">Reasoning Effort</label>
+                            <select id="modal-assistant-reasoning" class="input">
+                                <option value="auto">Auto (let model decide)</option>
+                                <option value="minimal">Minimal</option>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                            </select>
+                            <p id="modal-assistant-reasoning-hint" class="field-hint">Select a reasoning level for o-series models.</p>
+                        </div>
+
                         <div class="form-field">
-                            <label>Knowledge Bases</label>
-                            <div id="modal-vector-stores" class="checkbox-group" role="group" aria-label="Knowledge Bases"></div>
+                            <label id="modal-assistant-tools-label">Tools</label>
+                            <div id="modal-assistant-tools" class="checkbox-group" role="group" aria-label="Assistant Tools">
+                                <label class="checkbox-label" data-tool="file_search">
+                                    <input type="checkbox" value="file_search" checked />
+                                    <span>File Search</span>
+                                </label>
+                                <label class="checkbox-label" data-tool="code_interpreter">
+                                    <input type="checkbox" value="code_interpreter" />
+                                    <span>Code Interpreter</span>
+                                </label>
+                            </div>
+                            <p class="field-hint" id="modal-assistant-tools-hint">Choose how the assistant can access knowledge or run code.</p>
+                        </div>
+
+                        <div class="form-field">
+                            <label for="modal-vector-store-select">Knowledge Base</label>
+                            <select id="modal-vector-store-select" class="input" aria-label="Knowledge Base">
+                                <option value="">None</option>
+                            </select>
+                            <p class="field-hint" id="modal-vector-stores-hint">Select one knowledge base to power File Search responses (OpenAI allows only 1 per assistant).</p>
                         </div>
                     </div>
                     <div class="modal-actions">
@@ -222,6 +259,19 @@ class SettingsPanel {
         document.body.insertAdjacentHTML('beforeend', inputModalHTML);
         document.body.insertAdjacentHTML('beforeend', assistantModalHTML);
         document.body.insertAdjacentHTML('beforeend', toastHTML);
+
+        const modelSelect = document.getElementById('modal-assistant-model');
+        if (modelSelect) {
+            modelSelect.addEventListener('change', () => this.updateAssistantModalCapabilities());
+        }
+        const toolsContainer = document.getElementById('modal-assistant-tools');
+        if (toolsContainer) {
+            toolsContainer.addEventListener('change', (event) => {
+                if (event.target instanceof HTMLInputElement) {
+                    this.handleAssistantToolToggle();
+                }
+            });
+        }
     }
     
     // Modal helpers
@@ -233,7 +283,8 @@ class SettingsPanel {
             
             const yesBtn = document.getElementById('confirm-yes');
             const handler = () => {
-                this.hideConfirmModal();
+                this.hideConfirmModal(false);
+                this.confirmResolve = null;
                 yesBtn.removeEventListener('click', handler);
                 resolve(true);
             };
@@ -246,35 +297,53 @@ class SettingsPanel {
         });
     }
     
-    hideConfirmModal() {
+    hideConfirmModal(cancelled = true) {
         document.getElementById('confirm-modal').style.display = 'none';
-        if (this.confirmResolve) {
+        if (cancelled && this.confirmResolve) {
             this.confirmResolve();
-            this.confirmResolve = null;
         }
+        this.confirmResolve = null;
     }
     
     async prompt(title, defaultValue = '') {
         return new Promise((resolve) => {
+            const inputField = document.getElementById('input-field');
+            const okBtn = document.getElementById('input-ok');
+            
             document.getElementById('input-title').textContent = title;
-            document.getElementById('input-field').value = defaultValue;
+            inputField.value = defaultValue;
             document.getElementById('input-modal').style.display = 'flex';
             
-            const okBtn = document.getElementById('input-ok');
-            const handler = () => {
-                const value = document.getElementById('input-field').value;
-                this.hideInputModal();
-                okBtn.removeEventListener('click', handler);
+            const handleOk = () => {
+                const value = inputField.value.trim();
+                // Clear inputResolve before hiding to prevent double resolution
+                this.inputResolve = null;
+                document.getElementById('input-modal').style.display = 'none';
+                okBtn.removeEventListener('click', handleOk);
+                inputField.removeEventListener('keydown', handleKeyDown);
                 resolve(value);
             };
-            okBtn.addEventListener('click', handler);
+            
+            const handleKeyDown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleOk();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.hideInputModal();
+                }
+            };
+            
+            okBtn.addEventListener('click', handleOk);
+            inputField.addEventListener('keydown', handleKeyDown);
             
             this.inputResolve = () => {
-                okBtn.removeEventListener('click', handler);
+                okBtn.removeEventListener('click', handleOk);
+                inputField.removeEventListener('keydown', handleKeyDown);
                 resolve('');
             };
             
-            setTimeout(() => document.getElementById('input-field').focus(), 100);
+            setTimeout(() => inputField.focus(), 100);
         });
     }
     
@@ -296,95 +365,361 @@ class SettingsPanel {
         }, 3000);
     }
     
+    setBusy(operation) {
+        if (this.isBusy) {
+            console.warn(`${this.logPrefix} Already busy with: ${this.busyOperation}`);
+            return false;
+        }
+        this.isBusy = true;
+        this.busyOperation = operation;
+        console.debug(`${this.logPrefix} setBusy: ${operation}`);
+        // Disable all action buttons
+        document.querySelectorAll('.fab-action, .btn-primary, .btn-ghost').forEach(btn => {
+            btn.disabled = true;
+            btn.style.opacity = '0.5';
+            btn.style.cursor = 'not-allowed';
+        });
+        return true;
+    }
+    
+    clearBusy() {
+        this.isBusy = false;
+        console.debug(`${this.logPrefix} clearBusy: ${this.busyOperation}`);
+        this.busyOperation = null;
+        // Re-enable all action buttons
+        document.querySelectorAll('.fab-action, .btn-primary, .btn-ghost').forEach(btn => {
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            btn.style.cursor = 'pointer';
+        });
+    }
+    
+    showLoading(containerId, message = 'Loading...') {
+        const container = document.getElementById(containerId);
+        if (container) {
+            container.innerHTML = `<div class="text-muted" style="text-align: center; padding: 20px;">${message}</div>`;
+        }
+    }
+    
     async showAssistantModal(assistant = null) {
         const modal = document.getElementById('assistant-modal');
         const title = document.getElementById('assistant-modal-title');
+        const modelSelect = document.getElementById('modal-assistant-model');
+        const reasoningSelect = document.getElementById('modal-assistant-reasoning');
         
         if (assistant) {
             title.textContent = 'Edit Assistant';
             document.getElementById('modal-assistant-id').value = assistant.id;
             document.getElementById('modal-assistant-name').value = assistant.name || '';
             document.getElementById('modal-assistant-instructions').value = assistant.instructions || '';
-            document.getElementById('modal-assistant-model').value = assistant.model || 'gpt-4o-mini';
+            if (modelSelect) {
+                modelSelect.value = assistant.model || 'gpt-4o-mini';
+                modelSelect.disabled = true;
+            }
+            this.currentReasoningEffort = assistant.reasoning_effort || 'auto';
+            this.currentAssistantModel = assistant.model || null;
         } else {
             title.textContent = 'Create Assistant';
             document.getElementById('modal-assistant-id').value = '';
             document.getElementById('modal-assistant-name').value = '';
             document.getElementById('modal-assistant-instructions').value = 'You are Rhasspy, a helpful AI assistant.';
-            document.getElementById('modal-assistant-model').value = 'gpt-4o-mini';
+            if (modelSelect) {
+                modelSelect.value = 'gpt-4o-mini';
+                modelSelect.disabled = false;
+            }
+            this.currentReasoningEffort = 'auto';
+            this.currentAssistantModel = 'gpt-4o-mini';
+        }
+
+        const toolTypes = assistant ? (assistant.tools || []).map(tool => tool?.type).filter(Boolean) : null;
+        this.setAssistantToolSelection(toolTypes);
+        this.handleAssistantToolToggle();
+
+        if (reasoningSelect) {
+            const initialReasoning = this.currentReasoningEffort || 'auto';
+            reasoningSelect.value = initialReasoning;
         }
         
         await this.loadVectorStoresForModal(assistant);
+        this.updateAssistantModalCapabilities();
         modal.style.display = 'flex';
+
+        const instructionsInput = document.getElementById('modal-assistant-instructions');
+        this.setupTextareaAutoResize(instructionsInput);
+
         setTimeout(() => document.getElementById('modal-assistant-name').focus(), 100);
+    }
+
+    isReasoningModel(model) {
+        return !!model && (model.startsWith('o1') || model.startsWith('o3'));
+    }
+
+    setAssistantToolSelection(toolTypes = null) {
+        const checkboxes = document.querySelectorAll('#modal-assistant-tools input[type="checkbox"]');
+        const typeSet = toolTypes ? new Set(toolTypes) : null;
+        checkboxes.forEach((checkbox) => {
+            if (typeSet) {
+                checkbox.checked = typeSet.has(checkbox.value);
+            } else {
+                checkbox.checked = checkbox.value === 'file_search';
+            }
+        });
+    }
+
+    setupTextareaAutoResize(textarea) {
+        if (!textarea) return;
+        const handler = () => {
+            textarea.style.height = 'auto';
+            textarea.style.height = `${Math.min(420, textarea.scrollHeight + 2)}px`;
+        };
+        if (textarea._autoResizeHandler) {
+            textarea.removeEventListener('input', textarea._autoResizeHandler);
+            textarea.removeEventListener('focus', textarea._autoResizeHandler);
+        }
+        textarea._autoResizeHandler = handler;
+        textarea.addEventListener('input', handler);
+        textarea.addEventListener('focus', handler);
+        handler();
+    }
+
+    getSelectedAssistantTools() {
+        const checkboxes = document.querySelectorAll('#modal-assistant-tools input[type="checkbox"]:checked');
+        const selected = new Set(Array.from(checkboxes).map(cb => cb.value));
+        if (selected.size === 0) {
+            const fileSearch = document.querySelector('#modal-assistant-tools input[value="file_search"]');
+            if (fileSearch) {
+                fileSearch.checked = true;
+                selected.add('file_search');
+            }
+        }
+        return Array.from(selected);
+    }
+
+    handleAssistantToolToggle() {
+        const selectedTools = this.getSelectedAssistantTools();
+        const hasFileSearch = selectedTools.includes('file_search');
+        const vectorStoreSelect = document.getElementById('modal-vector-store-select');
+        
+        if (vectorStoreSelect) {
+            vectorStoreSelect.disabled = !hasFileSearch;
+            if (!hasFileSearch) {
+                vectorStoreSelect.value = '';
+            }
+        }
+        
+        const knowledgeHint = document.getElementById('modal-vector-stores-hint');
+        if (knowledgeHint) {
+            knowledgeHint.textContent = hasFileSearch
+                ? 'Select one knowledge base to power File Search responses (OpenAI allows only 1 per assistant).'
+                : 'Enable File Search to attach a knowledge base.';
+        }
+    }
+
+    updateAssistantModalCapabilities() {
+        const modelSelect = document.getElementById('modal-assistant-model');
+        const reasoningSelect = document.getElementById('modal-assistant-reasoning');
+        const reasoningHint = document.getElementById('modal-assistant-reasoning-hint');
+        const isReasoning = this.isReasoningModel(modelSelect?.value || '');
+
+        const reasoningWrapper = document.getElementById('modal-assistant-reasoning-wrapper');
+        if (reasoningWrapper) {
+            reasoningWrapper.style.display = isReasoning ? '' : 'none';
+        }
+
+        if (reasoningSelect) {
+            if (isReasoning) {
+                reasoningSelect.disabled = false;
+                if (!['minimal', 'low', 'medium', 'high'].includes(reasoningSelect.value)) {
+                    reasoningSelect.value = 'minimal';
+                }
+                if (reasoningHint) {
+                    reasoningHint.textContent = 'Higher effort improves reasoning depth at the cost of latency.';
+                }
+            } else {
+                reasoningSelect.disabled = true;
+                reasoningSelect.value = 'auto';
+                if (reasoningHint) {
+                    reasoningHint.textContent = '';
+                }
+            }
+        }
+
+        const codeCheckbox = document.querySelector('#modal-assistant-tools input[value="code_interpreter"]');
+        const codeLabel = codeCheckbox ? codeCheckbox.closest('.checkbox-label') : null;
+        const toolsContainer = document.getElementById('modal-assistant-tools');
+        const toolsLabel = document.getElementById('modal-assistant-tools-label');
+        const toolsHint = document.getElementById('modal-assistant-tools-hint');
+        if (codeCheckbox && codeLabel) {
+            if (isReasoning) {
+                codeCheckbox.checked = false;
+                codeCheckbox.disabled = true;
+                codeLabel.style.display = 'none';
+                if (toolsHint) {
+                    toolsHint.textContent = 'Reasoning models rely on File Search to answer from knowledge bases.';
+                }
+                if (toolsLabel) {
+                    toolsLabel.textContent = 'Tools (File Search only)';
+                }
+            } else {
+                codeCheckbox.disabled = false;
+                codeLabel.style.display = '';
+                if (toolsHint) {
+                    toolsHint.textContent = 'Choose how the assistant can access knowledge or run code.';
+                }
+                if (toolsLabel) {
+                    toolsLabel.textContent = 'Tools';
+                }
+            }
+        }
+        if (toolsContainer) {
+            toolsContainer.style.display = 'flex';
+        }
+
+        this.handleAssistantToolToggle();
     }
     
     hideAssistantModal() {
         document.getElementById('assistant-modal').style.display = 'none';
+        this.currentReasoningEffort = 'auto';
+        this.currentAssistantModel = null;
+        const modelSelect = document.getElementById('modal-assistant-model');
+        if (modelSelect) {
+            modelSelect.disabled = false;
+        }
     }
     
     async loadVectorStoresForModal(assistant = null) {
-        const container = document.getElementById('modal-vector-stores');
-        container.innerHTML = '<div class="text-muted">Loading...</div>';
+        const select = document.getElementById('modal-vector-store-select');
+        if (!select) return;
         
+        // Preserve current selection if assistant is not provided (e.g., after creating/renaming KB)
+        const currentSelection = assistant ? null : select.value;
+        
+        // Show loading state
+        select.innerHTML = '<option value="">Loading...</option>';
+        select.disabled = true;
+
         try {
-            const vectorStores = await this.assistantManager.listVectorStores();
-            const attachedIds = assistant?.tool_resources?.file_search?.vector_store_ids || [];
-            
+            const vectorStores = await this.assistantManager.listVectorStores(100);
+            // OpenAI only allows 1 vector store per assistant
+            // If assistant is provided, use its attached ID; otherwise preserve current selection
+            const attachedId = assistant?.tool_resources?.file_search?.vector_store_ids?.[0] || currentSelection || '';
+
             if (vectorStores.length === 0) {
-                container.innerHTML = '<div class="text-muted">No knowledge bases available</div>';
+                select.innerHTML = '<option value="">No knowledge bases available</option>';
+                select.disabled = false;
+                this.handleAssistantToolToggle();
                 return;
             }
-            
-            container.innerHTML = vectorStores.map(vs => {
-                const fileCount = vs.file_counts?.total || vs.file_counts?.completed || 0;
-                return `
-                    <label class="checkbox-label">
-                        <input type="checkbox" value="${vs.id}" ${attachedIds.includes(vs.id) ? 'checked' : ''} />
-                        <span>${vs.name || 'Unnamed'} (${fileCount} files)</span>
-                    </label>
-                `;
-            }).join('');
+
+            // Use file_counts from vector store objects (already available, no need for separate API calls)
+            const storeEntries = vectorStores.map((vs) => {
+                const counts = vs.file_counts || {};
+                const count = counts.completed ?? counts.total ?? counts.in_progress ?? 0;
+                return { id: vs.id, name: vs.name || 'Unnamed', count };
+            });
+
+            // Build dropdown options
+            select.innerHTML = '<option value="">None</option>' + 
+                storeEntries.map(({ id, name, count }) => 
+                    `<option value="${id}" ${attachedId === id ? 'selected' : ''}>${this.escapeHtml(name)} (${count} files)</option>`
+                ).join('');
+
+            select.disabled = false;
+            this.handleAssistantToolToggle();
         } catch (error) {
-            container.innerHTML = '<div class="text-error">Failed to load</div>';
+            console.error(`${this.logPrefix} loadVectorStoresForModal failed`, error);
+            select.innerHTML = '<option value="">Failed to load</option>';
+            select.disabled = false;
+            this.handleAssistantToolToggle();
         }
     }
     
     async saveAssistantFromModal() {
+        if (!this.setBusy('saveAssistant')) return;
+        
         const id = document.getElementById('modal-assistant-id').value;
         const name = document.getElementById('modal-assistant-name').value.trim();
         const instructions = document.getElementById('modal-assistant-instructions').value.trim();
         const model = document.getElementById('modal-assistant-model').value;
         
-        const vectorStoreIds = Array.from(
-            document.querySelectorAll('#modal-vector-stores input[type="checkbox"]:checked')
-        ).map(cb => cb.value);
+        // OpenAI API limitation: Only 1 vector store per assistant is allowed
+        // Get selected vector store from dropdown
+        const vectorStoreSelect = document.getElementById('modal-vector-store-select');
+        const selectedTools = this.getSelectedAssistantTools();
+        const reasoningSelect = document.getElementById('modal-assistant-reasoning');
+        const reasoningValue = reasoningSelect ? reasoningSelect.value : 'auto';
+        const baseModel = id ? (this.currentAssistantModel || model) : model;
+        const isReasoningModel = this.isReasoningModel(baseModel);
+        
+        // Allow empty tools array - tools are optional in OpenAI API
+        // If file_search is not selected, clear vector stores
+        let vectorStoreIds = [];
+        if (selectedTools.includes('file_search')) {
+            const selectedVectorStoreId = vectorStoreSelect ? vectorStoreSelect.value : '';
+            vectorStoreIds = selectedVectorStoreId ? [selectedVectorStoreId] : [];
+        } else {
+            // Clear dropdown if file_search is not selected
+            if (vectorStoreSelect) {
+                vectorStoreSelect.value = '';
+            }
+        }
         
         if (!name) {
             this.showToast('Please enter a name', 'error');
+            this.clearBusy();
             return;
         }
         
         try {
+            console.groupCollapsed(`${this.logPrefix} saveAssistant`);
+            console.log('Data:', { id, name, model, vectorStoreIds, selectedTools, reasoningValue });
+            
             const payload = {
                 name,
                 instructions,
                 model,
-                vector_store_ids: vectorStoreIds
+                vector_store_ids: vectorStoreIds || [], // Always send array, empty if none selected
+                tools: selectedTools.map((type) => ({ type })) // Can be empty array
             };
+            
+            // Handle reasoning_effort: send value if not 'auto', or explicitly send null for 'auto' on reasoning models
+            if (isReasoningModel) {
+                if (reasoningValue && reasoningValue !== 'auto') {
+                    payload.reasoning_effort = reasoningValue;
+                } else if (reasoningValue === 'auto' && id) {
+                    // When updating, explicitly send null to clear reasoning_effort if user selects 'auto'
+                    payload.reasoning_effort = null;
+                }
+            }
 
             if (id) {
-                await this.assistantManager.updateAssistant(id, payload);
+                delete payload.model;
+                console.log('Updating assistant:', id);
+                const result = await this.assistantManager.updateAssistant(id, payload, undefined, undefined, undefined, this.currentAssistantModel);
+                if (result?.replaced_assistant_id) {
+                    console.info(`${this.logPrefix} Assistant ${result.replaced_assistant_id} replaced by ${result.id}`);
+                    if (this.assistantManager.getCurrentAssistant() === result.replaced_assistant_id) {
+                        this.assistantManager.setCurrentAssistant(result.id);
+                    }
+                }
                 this.showToast('Assistant updated');
             } else {
-                await this.assistantManager.createAssistant(name, instructions, model, vectorStoreIds);
+                console.log('Creating new assistant');
+                const result = await this.assistantManager.createAssistant(payload);
+                console.log('Created assistant:', result);
                 this.showToast('Assistant created');
             }
             
             this.hideAssistantModal();
             await this.loadAssistants();
+            console.groupEnd();
         } catch (error) {
-            this.showToast('Failed: ' + error.message, 'error');
+            console.error(`${this.logPrefix} saveAssistant failed`, error);
+            try { console.groupEnd(); } catch (_) {}
+            this.showToast('Failed: ' + (error.message || 'Unknown error'), 'error');
+        } finally {
+            this.clearBusy();
         }
     }
     
@@ -1120,8 +1455,8 @@ class SettingsPanel {
                 }
                 
                 .modal-md {
-                    width: 90%;
-                    max-width: 500px;
+                    width: 88%;
+                    max-width: 460px;
                     max-height: 80vh;
                     display: flex;
                     flex-direction: column;
@@ -1136,14 +1471,14 @@ class SettingsPanel {
                 }
                 
                 .modal-header h3 {
-                    font-size: 18px;
+                    font-size: 16px;
                     font-weight: 600;
                     margin: 0;
                     color: var(--primary-dark);
                 }
                 
                 .modal-content {
-                    padding: 24px;
+                    padding: 20px 22px;
                     overflow-y: auto;
                 }
                 
@@ -1159,14 +1494,14 @@ class SettingsPanel {
                 }
                 
                 .modal-content p {
-                    margin: 0 0 16px 0;
+                    margin: 0 0 12px 0;
                     color: #6b7280;
-                    line-height: 1.6;
-                    font-size: 14px;
+                    line-height: 1.5;
+                    font-size: 12px;
                 }
                 
                 .modal-actions {
-                    padding: 16px 24px;
+                    padding: 14px 22px;
                     border-top: 1px solid #e5e7eb;
                     display: flex;
                     justify-content: flex-end;
@@ -1179,18 +1514,24 @@ class SettingsPanel {
                 
                 .form-field label {
                     display: block;
-                    margin-bottom: 6px;
-                    font-size: 13px;
+                    margin-bottom: 4px;
+                    font-size: 12px;
                     font-weight: 500;
                     color: #374151;
+                }
+
+                .field-hint {
+                    margin-top: 4px;
+                    font-size: 10px;
+                    color: #6b7280;
                 }
                 
                 .input {
                     width: 100%;
-                    padding: 8px 12px;
+                    padding: 7px 10px;
                     border: 1px solid rgba(189, 18, 10, 0.2);
                     border-radius: 8px;
-                    font-size: 14px;
+                    font-size: 12.5px;
                     transition: all 0.2s;
                     background: rgba(189, 18, 10, 0.02);
                 }
@@ -1205,6 +1546,8 @@ class SettingsPanel {
                 textarea.input {
                     resize: vertical;
                     font-family: inherit;
+                    min-height: 66px;
+                    overflow: hidden;
                 }
                 
                 .checkbox-group {
@@ -1217,18 +1560,23 @@ class SettingsPanel {
                     background: rgba(189, 18, 10, 0.04);
                     border-radius: 8px;
                 }
+
+                .checkbox-group.disabled {
+                    opacity: 0.45;
+                    pointer-events: none;
+                }
                 
                 .checkbox-label {
                     display: flex;
                     align-items: center;
                     gap: 8px;
-                    padding: 10px 12px;
+                    padding: 8px 10px;
                     background: white;
                     border: 1px solid rgba(189, 18, 10, 0.18);
                     border-radius: 8px;
                     cursor: pointer;
                     transition: all 0.2s;
-                    font-size: 13px;
+                    font-size: 12px;
                 }
                 
                 .checkbox-label:hover {
@@ -1349,7 +1697,7 @@ class SettingsPanel {
     // Assistants
     async loadAssistants() {
         const container = document.getElementById('assistants-list');
-        container.innerHTML = '<div class="text-muted">Loading...</div>';
+        this.showLoading('assistants-list', 'Loading assistants...');
         
         try {
             console.groupCollapsed(`${this.logPrefix} loadAssistants`);
@@ -1357,13 +1705,20 @@ class SettingsPanel {
             const currentId = this.assistantManager.getCurrentAssistant();
             
             // Get vector stores to show attachments with file counts
-            const vectorStores = await this.assistantManager.listVectorStores();
+            // Use file_counts from vector store objects (already available, no need for separate API calls)
+            // Add timestamp to prevent caching issues
+            const vectorStores = await this.assistantManager.listVectorStores(100);
             const vsMap = {};
             const vsFileCountMap = {};
             vectorStores.forEach(vs => {
                 vsMap[vs.id] = vs.name || 'Unnamed';
-                vsFileCountMap[vs.id] = vs.file_counts?.completed || vs.file_counts?.total || 0;
+                // Use file_counts from the vector store object (much faster than separate API calls)
+                // Use same logic as loadVectorStores: total first, then completed, then in_progress
+                const counts = vs.file_counts || {};
+                vsFileCountMap[vs.id] = counts.total ?? counts.completed ?? counts.in_progress ?? 0;
             });
+            
+            console.debug(`${this.logPrefix} loadAssistants - Vector store file counts:`, vsFileCountMap);
             
             if (assistants.length === 0) {
                 container.innerHTML = '<div class="text-muted">No assistants yet</div>';
@@ -1396,17 +1751,20 @@ class SettingsPanel {
                     const fileCount = vsFileCountMap[id] || 0;
                     return `${name} (${fileCount} files)`;
                 });
-                const totalFiles = attachedVS.reduce((sum, id) => sum + (vsFileCountMap[id] || 0), 0);
                 const knowledgeLabel = knowledgeInfo.length
-                    ? `KNOWLEDGE: ${knowledgeInfo.join(', ')}`
+                    ? `File Search: ${knowledgeInfo.join(' • ')}`
                     : '';
                 const safeKnowledgeLabel = knowledgeLabel ? this.escapeHtml(knowledgeLabel) : '';
+                const hasCodeInterpreter = (detail?.tools || []).some(tool => tool?.type === 'code_interpreter');
                 
                 const badgeSegments = [
                     `<span class="card-badge accent">${safeModel}</span>`
                 ];
                 if (knowledgeLabel) {
                     badgeSegments.push(`<span class="card-badge neutral">${safeKnowledgeLabel}</span>`);
+                }
+                if (hasCodeInterpreter) {
+                    badgeSegments.push('<span class="card-badge neutral">Code Interpreter</span>');
                 }
                 if (isActive) {
                     badgeSegments.push('<span class="card-badge success">Active</span>');
@@ -1463,15 +1821,26 @@ class SettingsPanel {
     }
     
     async deleteAssistant(assistantId) {
+        if (this.isBusy) {
+            this.showToast('Please wait...', 'error');
+            return;
+        }
+        
         const confirmed = await this.confirm('Delete Assistant', 'Are you sure? This cannot be undone.');
         if (!confirmed) return;
         
+        if (!this.setBusy('deleteAssistant')) return;
+        
         try {
+            console.log(`${this.logPrefix} Deleting assistant:`, assistantId);
             await this.assistantManager.deleteAssistant(assistantId);
-            this.showToast('Deleted');
+            this.showToast('Assistant deleted');
             await this.loadAssistants();
         } catch (error) {
-            this.showToast('Failed to delete', 'error');
+            console.error(`${this.logPrefix} deleteAssistant failed`, error);
+            this.showToast('Failed to delete: ' + (error.message || 'Unknown error'), 'error');
+        } finally {
+            this.clearBusy();
         }
     }
     
@@ -1497,11 +1866,11 @@ class SettingsPanel {
     // Vector Stores
     async loadVectorStores() {
         const container = document.getElementById('vectorstores-list');
-        container.innerHTML = '<div class="text-muted">Loading...</div>';
+        this.showLoading('vectorstores-list', 'Loading knowledge bases...');
         
         try {
             console.groupCollapsed(`${this.logPrefix} loadVectorStores`);
-            const stores = await this.assistantManager.listVectorStores();
+            const stores = await this.assistantManager.listVectorStores(100);
             
             if (stores.length === 0) {
                 container.innerHTML = '<div class="text-muted">No knowledge bases yet</div>';
@@ -1512,7 +1881,10 @@ class SettingsPanel {
             
             container.innerHTML = '';
             stores.forEach(vs => {
-                const fileCount = vs.file_counts?.total || vs.file_counts?.completed || 0;
+                // Use same logic as loadAssistants: total first, then completed, then in_progress
+                const counts = vs.file_counts || {};
+                const fileCount = counts.total ?? counts.completed ?? counts.in_progress ?? 0;
+                console.debug(`${this.logPrefix} loadVectorStores - ${vs.name}: file_counts=`, counts, 'calculated=', fileCount);
                 const name = vs.name || 'Unnamed';
                 const safeName = this.escapeHtml(name);
                 const safeStatus = this.escapeHtml(vs.status || 'pending');
@@ -1556,44 +1928,143 @@ class SettingsPanel {
     }
     
     async createVectorStore() {
+        if (this.isBusy) {
+            this.showToast('Please wait...', 'error');
+            return;
+        }
+        
         const name = await this.prompt('Create Knowledge Base', 'My Knowledge Base');
-        if (!name) return;
+        if (!name || !name.trim()) {
+            console.debug(`${this.logPrefix} createVectorStore cancelled or empty name`);
+            return;
+        }
+        
+        if (!this.setBusy('createVectorStore')) return;
         
         try {
-            await this.assistantManager.createVectorStore(name);
-            this.showToast('Created');
-            await this.loadVectorStores();
-            await this.populateVectorStoreSelect();
+            console.log(`${this.logPrefix} Creating vector store:`, name);
+            const result = await this.assistantManager.createVectorStore(name.trim());
+            console.log(`${this.logPrefix} Created vector store:`, result);
+            this.showToast('Knowledge base created');
+            
+            // Longer delay to ensure creation is fully processed by OpenAI
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Refresh all related data - ensure all complete successfully
+            try {
+                await Promise.all([
+                    this.loadVectorStores(),
+                    this.populateVectorStoreSelect(),
+                    // Refresh assistant modal dropdown if modal is open
+                    this.loadVectorStoresForModal()
+                ]);
+                console.log(`${this.logPrefix} Knowledge base list refreshed after create`);
+            } catch (refreshError) {
+                console.error(`${this.logPrefix} Error refreshing after create:`, refreshError);
+            }
+            
+            // Refresh assistants to update any badges
+            try {
+                await this.loadAssistants();
+                console.log(`${this.logPrefix} Assistants refreshed after knowledge base create`);
+            } catch (refreshError) {
+                console.error(`${this.logPrefix} Error refreshing assistants after create:`, refreshError);
+            }
         } catch (error) {
-            this.showToast('Failed to create', 'error');
+            console.error(`${this.logPrefix} createVectorStore failed`, error);
+            const errorMsg = error.message || error.error || 'Unknown error';
+            this.showToast('Failed to create: ' + errorMsg, 'error');
+        } finally {
+            this.clearBusy();
         }
     }
     
     async renameVectorStore(id, currentName) {
         const newName = await this.prompt('Rename Knowledge Base', currentName);
-        if (!newName || newName === currentName) return;
+        if (!newName || !newName.trim() || newName.trim() === currentName) {
+            console.debug(`${this.logPrefix} renameVectorStore cancelled or unchanged`);
+            return;
+        }
         
         try {
-            await this.assistantManager.updateVectorStore(id, newName);
+            console.log(`${this.logPrefix} Renaming vector store:`, { id, oldName: currentName, newName });
+            await this.assistantManager.updateVectorStore(id, newName.trim());
             this.showToast('Renamed');
-            await this.loadVectorStores();
-            await this.populateVectorStoreSelect();
+            
+            // Longer delay to ensure update is fully processed by OpenAI
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Refresh all related data - ensure all complete successfully
+            try {
+                await Promise.all([
+                    this.loadVectorStores(),
+                    this.populateVectorStoreSelect(),
+                    // Refresh assistant modal dropdown if modal is open
+                    this.loadVectorStoresForModal()
+                ]);
+                console.log(`${this.logPrefix} Knowledge base list refreshed after rename`);
+            } catch (refreshError) {
+                console.error(`${this.logPrefix} Error refreshing after rename:`, refreshError);
+            }
+            
+            // Refresh assistants to update any badges
+            try {
+                await this.loadAssistants();
+                console.log(`${this.logPrefix} Assistants refreshed after knowledge base rename`);
+            } catch (refreshError) {
+                console.error(`${this.logPrefix} Error refreshing assistants after rename:`, refreshError);
+            }
         } catch (error) {
-            this.showToast('Failed to rename', 'error');
+            console.error(`${this.logPrefix} renameVectorStore failed`, error);
+            const errorMsg = error.message || error.error || 'Unknown error';
+            this.showToast('Failed to rename: ' + errorMsg, 'error');
         }
     }
     
     async deleteVectorStore(id) {
+        if (this.isBusy) {
+            this.showToast('Please wait...', 'error');
+            return;
+        }
+        
         const confirmed = await this.confirm('Delete Knowledge Base', 'All files will be removed. Continue?');
         if (!confirmed) return;
         
+        if (!this.setBusy('deleteVectorStore')) return;
+        
         try {
+            console.log(`${this.logPrefix} Deleting vector store:`, id);
             await this.assistantManager.deleteVectorStore(id);
-            this.showToast('Deleted');
-            await this.loadVectorStores();
-            await this.populateVectorStoreSelect();
+            this.showToast('Knowledge base deleted');
+            
+            // Longer delay to ensure deletion is fully processed by OpenAI
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Refresh all related data - ensure all complete successfully
+            try {
+                await Promise.all([
+                    this.loadVectorStores(),
+                    this.populateVectorStoreSelect(),
+                    // Refresh assistant modal dropdown if modal is open
+                    this.loadVectorStoresForModal()
+                ]);
+                console.log(`${this.logPrefix} Knowledge base list refreshed after delete`);
+            } catch (refreshError) {
+                console.error(`${this.logPrefix} Error refreshing after delete:`, refreshError);
+            }
+            
+            // Refresh assistants to update any badges
+            try {
+                await this.loadAssistants();
+                console.log(`${this.logPrefix} Assistants refreshed after knowledge base delete`);
+            } catch (refreshError) {
+                console.error(`${this.logPrefix} Error refreshing assistants after delete:`, refreshError);
+            }
         } catch (error) {
-            this.showToast('Failed to delete', 'error');
+            console.error(`${this.logPrefix} deleteVectorStore failed`, error);
+            this.showToast('Failed to delete: ' + (error.message || 'Unknown error'), 'error');
+        } finally {
+            this.clearBusy();
         }
     }
     
@@ -1607,9 +2078,10 @@ class SettingsPanel {
     // Files
     async populateVectorStoreSelect() {
         const select = document.getElementById('files-vectorstore-select');
+        if (!select) return;
         
         try {
-            const stores = await this.assistantManager.listVectorStores();
+            const stores = await this.assistantManager.listVectorStores(100);
             select.innerHTML = '<option value="">Select...</option>' +
                 stores.map(vs => {
                     const fileCount = vs.file_counts?.total || vs.file_counts?.completed || 0;
@@ -1617,6 +2089,8 @@ class SettingsPanel {
                 }).join('');
         } catch (error) {
             console.error('Error populating select:', error);
+            // Set a default message if there's an error
+            select.innerHTML = '<option value="">Error loading knowledge bases</option>';
         }
     }
     
@@ -1636,7 +2110,7 @@ class SettingsPanel {
         if (!this.selectedVectorStore) return;
         
         const container = document.getElementById('files-list');
-        container.innerHTML = '<div class="text-muted">Loading...</div>';
+        this.showLoading('files-list', 'Loading files...');
         
         try {
             console.groupCollapsed(`${this.logPrefix} loadFiles`);
@@ -1723,11 +2197,22 @@ class SettingsPanel {
             });
             await this.assistantManager.addFileToVectorStore(this.selectedVectorStore, file);
             this.showToast('Uploaded');
+            
+            // Longer delay to allow OpenAI to update file_counts (files need time to process)
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            
+            // Refresh all related data
             await Promise.all([
                 this.loadFiles(),
                 this.loadVectorStores(),
                 this.populateVectorStoreSelect()
             ]);
+            
+            // Additional delay before refreshing assistants to ensure file_counts are updated
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            // Refresh assistants after vector stores are updated to get fresh file counts
+            await this.loadAssistants();
             console.groupEnd();
         } catch (error) {
             console.error(`${this.logPrefix} uploadFile failed`, error);
@@ -1745,9 +2230,22 @@ class SettingsPanel {
         try {
             await this.assistantManager.deleteVectorStoreFile(this.selectedVectorStore, fileId);
             this.showToast('Deleted');
-            await this.loadFiles();
-            await this.loadVectorStores();
-            await this.populateVectorStoreSelect();
+            
+            // Longer delay to allow OpenAI to update file_counts
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            
+            // Refresh all related data
+            await Promise.all([
+                this.loadFiles(),
+                this.loadVectorStores(),
+                this.populateVectorStoreSelect()
+            ]);
+            
+            // Additional delay before refreshing assistants to ensure file_counts are updated
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            // Refresh assistants after vector stores are updated to get fresh file counts
+            await this.loadAssistants();
         } catch (error) {
             this.showToast('Failed to delete', 'error');
         }

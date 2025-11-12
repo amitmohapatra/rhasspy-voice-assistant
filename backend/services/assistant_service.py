@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
+from openai import NotFoundError as OpenAINotFoundError
 
 from config import config
 
@@ -35,13 +36,58 @@ class AssistantService:
     
     # ============ Assistant Management ============
     
+    def _is_reasoning_model(self, model: Optional[str]) -> bool:
+        """Check if a model is a reasoning model (o1 or o3 series)"""
+        if not model:
+            return False
+        return model.startswith('o1') or model.startswith('o3')
+    
+    def _get_supported_tools(self, model: Optional[str]) -> List[Dict]:
+        """Get supported tools for a given model"""
+        if model and (model.startswith('o1') or model.startswith('o3')):
+            return [{"type": "file_search"}]
+        return [{"type": "file_search"}, {"type": "code_interpreter"}]
+    
+    def _serialize_assistant(self, assistant) -> Dict[str, Any]:
+        reasoning_effort = None
+        try:
+            # Try to get reasoning_effort from assistant object
+            reasoning_effort = getattr(assistant, "reasoning_effort", None)
+            if reasoning_effort is None:
+                # Fallback: try to extract from reasoning attribute
+                reasoning = getattr(assistant, "reasoning", None)
+                if isinstance(reasoning, dict):
+                    reasoning_effort = reasoning.get("effort")
+                elif reasoning is not None:
+                    reasoning_effort = getattr(reasoning, "effort", None)
+        except Exception as exc:
+            self.logger.debug("Could not extract reasoning from assistant %s: %s", getattr(assistant, "id", None), exc)
+
+        tool_resources = None
+        try:
+            tool_resources = assistant.tool_resources.model_dump() if hasattr(assistant.tool_resources, 'model_dump') else (
+                dict(assistant.tool_resources) if assistant.tool_resources else {})
+        except Exception:
+            tool_resources = {}
+
+        return {
+            "id": assistant.id,
+            "name": assistant.name,
+            "model": assistant.model,
+            "instructions": assistant.instructions,
+            "tools": [tool.model_dump() if hasattr(tool, 'model_dump') else dict(tool) for tool in (assistant.tools or [])],
+            "tool_resources": tool_resources,
+            "reasoning_effort": reasoning_effort
+        }
+
     def create_assistant(
         self,
         name: Optional[str] = None,
         instructions: Optional[str] = None,
         model: Optional[str] = None,
         tools: Optional[List[Dict]] = None,
-        vector_store_ids: Optional[List[str]] = None
+        vector_store_ids: Optional[List[str]] = None,
+        reasoning_effort: Optional[str] = None
     ) -> Dict[str, Any]:
         """Create a new assistant"""
         name = name or config.DEFAULT_ASSISTANT_NAME
@@ -50,24 +96,24 @@ class AssistantService:
         tool_resources = {}
         if vector_store_ids:
             tool_resources["file_search"] = {"vector_store_ids": vector_store_ids}
+        tools_to_use = tools or [{"type": "file_search"}]
         
-        assistant = self.client.beta.assistants.create(
-            name=name,
-            instructions=instructions,
-            model=model,
-            tools=tools or [{"type": "file_search"}],
-            tool_resources=tool_resources if tool_resources else None
-        )
+        reasoning_param = reasoning_effort if (reasoning_effort and self._is_reasoning_model(model)) else None
+
+        create_kwargs = {
+            "name": name,
+            "instructions": instructions,
+            "model": model,
+            "tools": tools_to_use,
+            "tool_resources": tool_resources if tool_resources else None
+        }
+        if reasoning_param:
+            create_kwargs["reasoning_effort"] = reasoning_param
+
+        assistant = self.client.beta.assistants.create(**create_kwargs)
         
         self.assistant_id = assistant.id
-        return {
-            "id": assistant.id,
-            "name": assistant.name,
-            "model": assistant.model,
-            "instructions": assistant.instructions,
-            "tools": [tool.model_dump() if hasattr(tool, 'model_dump') else dict(tool) for tool in (assistant.tools or [])],
-            "tool_resources": assistant.tool_resources.model_dump() if hasattr(assistant.tool_resources, 'model_dump') else (dict(assistant.tool_resources) if assistant.tool_resources else {})
-        }
+        return self._serialize_assistant(assistant)
     
     def get_assistant(self, assistant_id: Optional[str] = None) -> Dict[str, Any]:
         """Get assistant details"""
@@ -76,14 +122,7 @@ class AssistantService:
             raise ValueError("No assistant ID provided")
         
         assistant = self.client.beta.assistants.retrieve(aid)
-        return {
-            "id": assistant.id,
-            "name": assistant.name,
-            "model": assistant.model,
-            "instructions": assistant.instructions,
-            "tools": [tool.model_dump() if hasattr(tool, 'model_dump') else dict(tool) for tool in (assistant.tools or [])],
-            "tool_resources": assistant.tool_resources.model_dump() if hasattr(assistant.tool_resources, 'model_dump') else (dict(assistant.tool_resources) if assistant.tool_resources else {})
-        }
+        return self._serialize_assistant(assistant)
     
     def update_assistant(
         self,
@@ -92,7 +131,9 @@ class AssistantService:
         instructions: Optional[str] = None,
         model: Optional[str] = None,
         tools: Optional[List[Dict]] = None,
-        vector_store_ids: Optional[List[str]] = None
+        vector_store_ids: Optional[List[str]] = None,
+        reasoning_effort: Optional[str] = None,
+        reasoning_effort_provided: bool = False
     ) -> Dict[str, Any]:
         """Update assistant configuration"""
         aid = assistant_id or self.assistant_id
@@ -106,22 +147,37 @@ class AssistantService:
             update_data["instructions"] = instructions
         if model:
             update_data["model"] = model
-        if tools:
+        # Tools can be empty array [] - allow it by checking is not None
+        if tools is not None:
             update_data["tools"] = tools
+        # Vector store IDs can be empty array [] - allow it by checking is not None
         if vector_store_ids is not None:
             update_data["tool_resources"] = {
                 "file_search": {"vector_store_ids": vector_store_ids}
             }
+        # Reasoning effort: only process if it was explicitly provided
+        if reasoning_effort_provided:
+            # Get the target model (current assistant's model since model updates are not supported)
+            target_model = None
+            try:
+                target_model = self.get_assistant(aid)["model"]
+            except Exception:
+                pass
+            
+            # Only update reasoning_effort if it's a reasoning model
+            if target_model and self._is_reasoning_model(target_model):
+                # If reasoning_effort is not None, set it
+                # If reasoning_effort is None, we omit the field (OpenAI will keep existing value)
+                # Note: OpenAI API doesn't support setting reasoning_effort to None to clear it
+                # We omit the field to preserve the existing value
+                if reasoning_effort is not None:
+                    update_data["reasoning_effort"] = reasoning_effort
+                # If reasoning_effort is None, we don't include it in update_data
+                # This means OpenAI will keep the existing reasoning_effort value
+                # This is the desired behavior when user selects "auto" or wants to clear it
         
         assistant = self.client.beta.assistants.update(aid, **update_data)
-        return {
-            "id": assistant.id,
-            "name": assistant.name,
-            "model": assistant.model,
-            "instructions": assistant.instructions,
-            "tools": [tool.model_dump() if hasattr(tool, 'model_dump') else dict(tool) for tool in (assistant.tools or [])],
-            "tool_resources": assistant.tool_resources.model_dump() if hasattr(assistant.tool_resources, 'model_dump') else (dict(assistant.tool_resources) if assistant.tool_resources else {})
-        }
+        return self._serialize_assistant(assistant)
     
     def list_assistants(self, limit: int = 20) -> List[Dict[str, Any]]:
         """List all assistants"""
@@ -237,14 +293,33 @@ class AssistantService:
     
     def list_vector_stores(self, limit: int = 20) -> List[Dict[str, Any]]:
         """List all vector stores"""
-        stores = self.client.vector_stores.list(limit=limit)
-        return [{
-            "id": vs.id,
-            "name": vs.name,
-            "status": vs.status,
-            "file_counts": vs.file_counts.model_dump() if hasattr(vs.file_counts, 'model_dump') else dict(vs.file_counts) if vs.file_counts else {},
-            "created_at": vs.created_at
-        } for vs in stores.data]
+        # Validate limit parameter
+        if limit is None or limit < 1:
+            limit = 20
+        elif limit > 100:
+            self.logger.warning("Limit %d exceeds maximum of 100, capping to 100", limit)
+            limit = 100
+        
+        try:
+            stores = self.client.vector_stores.list(limit=limit)
+            return [{
+                "id": vs.id,
+                "name": vs.name,
+                "status": vs.status,
+                "file_counts": vs.file_counts.model_dump() if hasattr(vs.file_counts, 'model_dump') else dict(vs.file_counts) if vs.file_counts else {},
+                "created_at": vs.created_at
+            } for vs in stores.data]
+        except OpenAINotFoundError as e:
+            # Handle OpenAI API 404 errors gracefully
+            # Sometimes the API returns 404 when there are no vector stores or after deletion
+            self.logger.warning("OpenAI API returned 404 when listing vector stores, returning empty list: %s", str(e))
+            return []
+        except Exception as e:
+            # Log other errors but re-raise them
+            error_type = type(e).__name__
+            error_msg = str(e)
+            self.logger.error("Error listing vector stores (type=%s, limit=%d): %s", error_type, limit, error_msg, exc_info=True)
+            raise
     
     def update_vector_store(self, vector_store_id: str, name: str) -> Dict[str, Any]:
         """Update vector store name"""

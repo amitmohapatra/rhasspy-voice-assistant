@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Start script for Rhasspy AI Avatar
-# Sets up virtual environment, installs dependencies,
-# then launches backend (Flask) and frontend (static server).
+# Assumes Python and pip are already installed
+# Kills processes on busy ports and installs ffmpeg if needed
 
 set -euo pipefail
 
@@ -23,55 +23,66 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# Detect Python (assume installed, but find the command)
 detect_python() {
     if command -v python3 >/dev/null 2>&1; then
         echo "python3"
     elif command -v python >/dev/null 2>&1; then
         echo "python"
     else
-        echo ""
+        echo "python3"  # Default fallback
     fi
 }
 
 PYTHON_CMD="$(detect_python)"
-if [[ -z "${PYTHON_CMD}" ]]; then
-    echo -e "${RED}❌ Python is not installed. Please install Python 3.9+ and re-run this script.${NC}"
-    exit 1
-fi
+PIP_CMD="${PYTHON_CMD} -m pip"
 
-if ! "${PYTHON_CMD}" -m pip --version >/dev/null 2>&1; then
-    echo -e "${RED}❌ pip is not available for ${PYTHON_CMD}. Install pip and try again.${NC}"
-    exit 1
-fi
+echo -e "${BLUE}Using Python: ${PYTHON_CMD}${NC}"
 
-# Check ffmpeg and start installation in background if needed
-if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo -e "${YELLOW}⚠️ ffmpeg not found. Starting installation in background...${NC}"
-    (
-        if command -v brew >/dev/null 2>&1; then
-            brew install ffmpeg > "${LOG_FFMPEG}" 2>&1 && echo -e "${GREEN}✅ ffmpeg installed successfully${NC}" || echo -e "${YELLOW}⚠️ ffmpeg installation failed. Check ${LOG_FFMPEG}${NC}"
-        elif command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y ffmpeg > "${LOG_FFMPEG}" 2>&1 && echo -e "${GREEN}✅ ffmpeg installed successfully${NC}" || echo -e "${YELLOW}⚠️ ffmpeg installation failed. Check ${LOG_FFMPEG}${NC}"
-        elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y ffmpeg > "${LOG_FFMPEG}" 2>&1 && echo -e "${GREEN}✅ ffmpeg installed successfully${NC}" || echo -e "${YELLOW}⚠️ ffmpeg installation failed. Check ${LOG_FFMPEG}${NC}"
-        elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y ffmpeg > "${LOG_FFMPEG}" 2>&1 && echo -e "${GREEN}✅ ffmpeg installed successfully${NC}" || echo -e "${YELLOW}⚠️ ffmpeg installation failed. Check ${LOG_FFMPEG}${NC}"
-        elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm ffmpeg > "${LOG_FFMPEG}" 2>&1 && echo -e "${GREEN}✅ ffmpeg installed successfully${NC}" || echo -e "${YELLOW}⚠️ ffmpeg installation failed. Check ${LOG_FFMPEG}${NC}"
-        else
-            echo -e "${YELLOW}⚠️ Could not install ffmpeg automatically. Please install it manually:"
-            echo "   macOS: brew install ffmpeg"
-            echo "   Ubuntu/Debian: sudo apt-get install ffmpeg"
-            echo "   Fedora: sudo dnf install ffmpeg"
-            echo "   Arch: sudo pacman -Sy ffmpeg"
-            echo "   Windows: choco install ffmpeg  (or https://ffmpeg.org/download.html)"
-            echo "   (Installation log: ${LOG_FFMPEG})"
-        fi
-    ) &
-    echo -e "${BLUE}ℹ️  ffmpeg installation started in background. Servers will start now.${NC}"
-else
-    echo -e "${GREEN}✅ ffmpeg is already installed${NC}"
-fi
+# Install ffmpeg if not available
+install_ffmpeg() {
+    if command -v ffmpeg >/dev/null 2>&1; then
+        echo -e "${GREEN}✅ ffmpeg is already installed${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}⚠️  ffmpeg not found. Installing...${NC}"
+    
+    if command -v brew >/dev/null 2>&1; then
+        echo "Installing ffmpeg via Homebrew..."
+        brew install ffmpeg > "${LOG_FFMPEG}" 2>&1
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "Installing ffmpeg via apt-get..."
+        sudo apt-get update && sudo apt-get install -y ffmpeg > "${LOG_FFMPEG}" 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "Installing ffmpeg via dnf..."
+        sudo dnf install -y ffmpeg > "${LOG_FFMPEG}" 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        echo "Installing ffmpeg via yum..."
+        sudo yum install -y ffmpeg > "${LOG_FFMPEG}" 2>&1
+    elif command -v pacman >/dev/null 2>&1; then
+        echo "Installing ffmpeg via pacman..."
+        sudo pacman -Sy --noconfirm ffmpeg > "${LOG_FFMPEG}" 2>&1
+    else
+        echo -e "${YELLOW}⚠️  Could not install ffmpeg automatically. Please install it manually:${NC}"
+        echo "   macOS: brew install ffmpeg"
+        echo "   Ubuntu/Debian: sudo apt-get install ffmpeg"
+        echo "   Fedora: sudo dnf install ffmpeg"
+        echo "   Arch: sudo pacman -Sy ffmpeg"
+        echo "   (Installation log: ${LOG_FFMPEG})"
+        return 1
+    fi
+    
+    if command -v ffmpeg >/dev/null 2>&1; then
+        echo -e "${GREEN}✅ ffmpeg installed successfully${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠️  ffmpeg installation may have failed. Check ${LOG_FFMPEG}${NC}"
+        return 1
+    fi
+}
+
+install_ffmpeg
 
 # Set up virtual environment
 if [[ ! -d "${VENV_DIR}" ]]; then
@@ -85,29 +96,52 @@ echo "🔌 Activating virtual environment..."
 source "${VENV_DIR}/bin/activate"
 
 # Install/upgrade dependencies in venv
-echo "📦 Installing Python dependencies in virtual environment..."
-python -m pip install --upgrade pip >/dev/null
+echo "📦 Installing Python dependencies..."
+python -m pip install --upgrade pip >/dev/null 2>&1
 python -m pip install -r "${BACKEND_DIR}/requirements.txt"
 echo -e "${GREEN}✅ Python dependencies installed${NC}"
 
+# Kill process on a specific port
 kill_on_port() {
     local port="$1"
     local pids
+    
+    # Try lsof first (works on macOS/Linux)
     pids=$(lsof -ti tcp:"${port}" 2>/dev/null || true)
+    
+    # If lsof didn't work, try netstat/fuser
+    if [[ -z "${pids}" ]]; then
+        pids=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -v "^$" || true)
+    fi
+    
     if [[ -n "${pids}" ]]; then
-        echo -e "${YELLOW}⚠️  Port ${port} busy (PIDs: ${pids}) — terminating...${NC}"
-        kill ${pids} 2>/dev/null || true
-        sleep 1
-        if lsof -ti tcp:"${port}" >/dev/null 2>&1; then
-            kill -9 ${pids} 2>/dev/null || true
+        echo -e "${YELLOW}⚠️  Port ${port} is busy (PIDs: ${pids}) — killing processes...${NC}"
+        for pid in ${pids}; do
+            kill "${pid}" 2>/dev/null || true
+        done
+        sleep 2
+        
+        # Force kill if still running
+        pids=$(lsof -ti tcp:"${port}" 2>/dev/null || true)
+        if [[ -n "${pids}" ]]; then
+            echo -e "${YELLOW}⚠️  Force killing processes on port ${port}...${NC}"
+            for pid in ${pids}; do
+                kill -9 "${pid}" 2>/dev/null || true
+            done
             sleep 1
         fi
+        echo -e "${GREEN}✅ Port ${port} cleared${NC}"
+    else
+        echo -e "${GREEN}✅ Port ${port} is free${NC}"
     fi
 }
 
+# Kill existing Python processes for this project
 kill_existing_processes() {
+    echo "🔍 Checking for existing server processes..."
     pkill -f "python.*app.py" 2>/dev/null || true
-    pkill -f "python.*http.server ${FRONTEND_PORT}" 2>/dev/null || true
+    pkill -f "python.*http.server.*${FRONTEND_PORT}" 2>/dev/null || true
+    sleep 1
 }
 
 echo ""
@@ -117,7 +151,6 @@ echo "🔍 Ensuring ports ${BACKEND_PORT} and ${FRONTEND_PORT} are free..."
 kill_existing_processes
 kill_on_port "${BACKEND_PORT}"
 kill_on_port "${FRONTEND_PORT}"
-echo "✅ Ports cleared"
 
 attempt_backend_start() {
     echo -e "${BLUE}Starting backend server on http://localhost:${BACKEND_PORT}${NC}"
@@ -140,8 +173,9 @@ attempt_backend_start() {
 }
 
 if ! attempt_backend_start; then
-    echo -e "${YELLOW}⚠️ Backend failed to start on first attempt. Trying to free port ${BACKEND_PORT}...${NC}"
+    echo -e "${YELLOW}⚠️  Backend failed to start. Killing processes on port ${BACKEND_PORT} and retrying...${NC}"
     kill_on_port "${BACKEND_PORT}"
+    sleep 2
     if ! attempt_backend_start; then
         echo -e "${RED}❌ Backend failed to start after retry. Check ${LOG_BACKEND}.${NC}"
         exit 1
@@ -186,8 +220,8 @@ if [[ -f "${LOG_FFMPEG}" ]]; then
 fi
 echo ""
 echo "🛑 To stop servers, run:"
-echo "   pkill -f 'python app.py'"
-echo "   pkill -f 'python -m http.server ${FRONTEND_PORT}'"
+echo "   pkill -f 'python.*app.py'"
+echo "   pkill -f 'python.*http.server.*${FRONTEND_PORT}'"
 echo ""
 echo "Press Ctrl+C to stop this script (servers remain running)"
 echo ""

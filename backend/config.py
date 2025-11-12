@@ -27,6 +27,7 @@ class Config:
         if not self._initialized:
             # OpenAI API Key (required for all AI features)
             self.OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+            self.OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', '').strip() or None
             
             # Logging Level
             self.LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()

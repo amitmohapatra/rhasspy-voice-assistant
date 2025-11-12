@@ -33,18 +33,31 @@ def create_assistant():
     
     try:
         data = request.json or {}
+        
+        # OpenAI API limitation: Only 1 vector store per assistant is allowed
+        vector_store_ids = data.get('vector_store_ids', [])
+        if vector_store_ids and len(vector_store_ids) > 1:
+            return jsonify({
+                "error": "OpenAI API only allows 1 vector store per assistant. Please select only 1 knowledge base."
+            }), 400
+        
         name = data.get('name', 'Rhasspy Assistant')
         instructions = data.get('instructions', 'You are Rhasspy, a helpful AI assistant.')
         model = data.get('model', 'gpt-4-turbo-preview')
         
-        log_request(endpoint, name=name, model=model)
+        log_request(endpoint, assistant_name=name, model=model)
         
+        reasoning_effort = data.get('reasoning_effort')
+        if isinstance(reasoning_effort, str) and reasoning_effort.lower() == 'auto':
+            reasoning_effort = None
+
         result = get_assistant_service().create_assistant(
             name=name,
             instructions=instructions,
             model=model,
             tools=data.get('tools'),
-            vector_store_ids=data.get('vector_store_ids')
+            vector_store_ids=vector_store_ids,
+            reasoning_effort=reasoning_effort
         )
         
         log_response(endpoint, 201, assistant_id=result.get('id'))
@@ -98,21 +111,57 @@ def update_assistant(assistant_id):
     try:
         data = request.json or {}
         
+        logger.info(f"UPDATE ASSISTANT REQUEST - ID: {assistant_id}, Data: {data}")
         log_request(endpoint, assistant_id=assistant_id, updates=list(data.keys()))
+
+        # Check if reasoning_effort was explicitly provided in the request
+        reasoning_effort_sentinel = object()
+        reasoning_effort = data.get('reasoning_effort', reasoning_effort_sentinel)
+        reasoning_effort_provided = reasoning_effort is not reasoning_effort_sentinel
         
-        result = get_assistant_service().update_assistant(
-            assistant_id=assistant_id,
-            name=data.get('name'),
-            instructions=data.get('instructions'),
-            model=data.get('model'),
-            tools=data.get('tools'),
-            vector_store_ids=data.get('vector_store_ids')
-        )
+        # Convert 'auto' string or None to None (which means omit the field for OpenAI API)
+        if reasoning_effort_provided:
+            if isinstance(reasoning_effort, str) and reasoning_effort.lower() == 'auto':
+                reasoning_effort = None
+            # Also handle explicit null from frontend
+            if reasoning_effort is None or reasoning_effort == 'null' or reasoning_effort == '':
+                reasoning_effort = None
         
+        # Get tools and vector_store_ids - these can be empty arrays
+        tools = data.get('tools')
+        vector_store_ids = data.get('vector_store_ids', [])  # Default to empty array if not provided
+        
+        # OpenAI API limitation: Only 1 vector store per assistant is allowed
+        if vector_store_ids and len(vector_store_ids) > 1:
+            return jsonify({
+                "error": "OpenAI API only allows 1 vector store per assistant. Please select only 1 knowledge base."
+            }), 400
+        
+        # Only pass reasoning_effort if it was explicitly provided
+        update_kwargs = {
+            'assistant_id': assistant_id,
+            'name': data.get('name'),
+            'instructions': data.get('instructions'),
+            'model': None,  # model updates are not supported
+            'tools': tools,  # Can be empty array []
+            'vector_store_ids': vector_store_ids,  # Can be empty array []
+        }
+        
+        # Only include reasoning_effort if it was explicitly provided in the request
+        if reasoning_effort_provided:
+            update_kwargs['reasoning_effort'] = reasoning_effort
+            update_kwargs['reasoning_effort_provided'] = True
+        else:
+            update_kwargs['reasoning_effort_provided'] = False
+        
+        result = get_assistant_service().update_assistant(**update_kwargs)
+        
+        logger.info(f"UPDATE ASSISTANT SUCCESS - ID: {assistant_id}")
         log_response(endpoint, 200, assistant_id=assistant_id)
         return jsonify(result), 200
         
     except Exception as e:
+        logger.error(f"UPDATE ASSISTANT FAILED - ID: {assistant_id}, Error: {str(e)}")
         return handle_error(endpoint, e, "Update assistant")
 
 
@@ -122,14 +171,17 @@ def delete_assistant(assistant_id):
     endpoint = f'/api/assistants/{assistant_id}'
     
     try:
+        logger.info(f"DELETE ASSISTANT REQUEST - ID: {assistant_id}")
         log_request(endpoint, assistant_id=assistant_id)
         
         result = get_assistant_service().delete_assistant(assistant_id)
         
+        logger.info(f"DELETE ASSISTANT SUCCESS - ID: {assistant_id}, Result: {result}")
         log_response(endpoint, 200, deleted=result)
         return jsonify({"deleted": result}), 200
         
     except Exception as e:
+        logger.error(f"DELETE ASSISTANT FAILED - ID: {assistant_id}, Error: {str(e)}")
         return handle_error(endpoint, e, "Delete assistant")
 
 
@@ -144,7 +196,7 @@ def create_vector_store():
         data = request.json or {}
         name = data.get('name', 'New Vector Store')
         
-        log_request(endpoint, name=name, file_count=len(data.get('file_ids', [])))
+        log_request(endpoint, vector_store_name=name, file_count=len(data.get('file_ids', [])))
         
         result = get_assistant_service().create_vector_store(
             name=name,
@@ -181,15 +233,22 @@ def list_vector_stores():
     endpoint = '/api/vector-stores'
     
     try:
-        limit = request.args.get('limit', 20, type=int)
+        # Validate and sanitize limit parameter
+        limit_arg = request.args.get('limit', 20, type=int)
+        # OpenAI API typically has a max limit of 100 for list operations
+        # Cap it to prevent bad requests
+        limit = min(max(1, limit_arg), 100) if limit_arg else 20
         
-        log_request(endpoint, limit=limit)
+        log_request(endpoint, limit=limit, original_limit=limit_arg)
         
         result = get_assistant_service().list_vector_stores(limit)
         
         log_response(endpoint, 200, count=len(result) if isinstance(result, list) else 0)
         return jsonify(result), 200
         
+    except ValueError as e:
+        logger.warning(f"Invalid limit parameter in list_vector_stores: {request.args.get('limit')}")
+        return jsonify({"error": "Invalid limit parameter. Must be an integer between 1 and 100."}), 400
     except Exception as e:
         return handle_error(endpoint, e, "List vector stores")
 
@@ -207,7 +266,7 @@ def update_vector_store(vector_store_id):
             logger.warning("Missing name in update request")
             return jsonify({"error": "Name is required"}), 400
         
-        log_request(endpoint, vector_store_id=vector_store_id, name=name)
+        log_request(endpoint, vector_store_id=vector_store_id, vector_store_name=name)
         
         result = get_assistant_service().update_vector_store(
             vector_store_id=vector_store_id,

@@ -34,6 +34,7 @@ class AudioService:
         if not self._initialized:
             config = Config.get_instance()
             self.openai_api_key = config.OPENAI_API_KEY
+            self.openai_base_url = config.OPENAI_BASE_URL
             self.default_voice = getattr(config, 'TTS_VOICE', 'nova')
             self.tts_model = getattr(config, 'TTS_MODEL', 'tts-1')
             self.stt_model = getattr(config, 'STT_MODEL', 'whisper-1')
@@ -71,7 +72,7 @@ class AudioService:
         audio_size = 0
         
         try:
-            client = OpenAI(api_key=self.openai_api_key)
+            client = OpenAI(api_key=self.openai_api_key, base_url=self.openai_base_url)
             
             # Convert FileStorage to bytes if needed
             if hasattr(audio_file, 'read'):
@@ -208,7 +209,7 @@ class AudioService:
         voice_to_use = voice or self.default_voice
         
         try:
-            client = OpenAI(api_key=self.openai_api_key)
+            client = OpenAI(api_key=self.openai_api_key, base_url=self.openai_base_url)
             
             logger.debug(
                 "TTS processing - text: %d chars, voice: %s, preview: '%s'",

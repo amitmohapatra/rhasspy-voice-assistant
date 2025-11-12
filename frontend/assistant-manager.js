@@ -17,8 +17,8 @@ class AssistantManager {
         this.currentAssistantId = sessionStorage.getItem('currentAssistantId');
         this.currentThreadId = sessionStorage.getItem('currentThreadId');
         this.defaultTools = [
-            { type: 'code_interpreter' },
-            { type: 'file_search' }
+            { type: 'file_search' },
+            { type: 'code_interpreter' }
         ];
         
         AssistantManager.instance = this;
@@ -31,19 +31,119 @@ class AssistantManager {
         return AssistantManager.instance;
     }
     
+    getToolsForModel(model) {
+        // o1 and o3-mini models only support file_search
+        if (this.isReasoningModel(model)) {
+            return [{ type: 'file_search' }];
+        }
+        // All other models can use default tools
+        return this.defaultTools;
+    }
+
+    isReasoningModel(model) {
+        return !!model && (model.startsWith('o1') || model.startsWith('o3'));
+    }
+
+    normalizeTools(tools, model) {
+        let normalized = [];
+        if (Array.isArray(tools) && tools.length > 0) {
+            normalized = tools.map((tool) => {
+                if (typeof tool === 'string') {
+                    return { type: tool };
+                }
+                if (tool && typeof tool === 'object' && tool.type) {
+                    return { ...tool };
+                }
+                return null;
+            }).filter(Boolean);
+        } else {
+            normalized = this.getToolsForModel(model);
+        }
+
+        if (this.isReasoningModel(model)) {
+            normalized = normalized.filter((tool) => tool.type !== 'code_interpreter');
+        }
+
+        // Ensure we don't send duplicate tool types
+        const seen = new Set();
+        normalized = normalized.filter((tool) => {
+            if (seen.has(tool.type)) {
+                return false;
+            }
+            seen.add(tool.type);
+            return true;
+        });
+
+        return normalized;
+    }
+
+    prepareAssistantPayload(basePayload, options = {}) {
+        const { fallbackModel = 'gpt-4o-mini', includeModel = true } = options;
+        const payload = { ...basePayload };
+        const hasExplicitModel = Object.prototype.hasOwnProperty.call(payload, 'model') && typeof payload.model === 'string' && payload.model.length > 0;
+        const model = hasExplicitModel ? payload.model : fallbackModel;
+
+        if (includeModel) {
+            if (!hasExplicitModel) {
+                payload.model = model;
+            }
+        } else {
+            if (hasExplicitModel) {
+                delete payload.model;
+            }
+        }
+
+        payload.tools = this.normalizeTools(payload.tools, model);
+        payload.vector_store_ids = Array.isArray(payload.vector_store_ids) ? [...payload.vector_store_ids] : [];
+
+        const hasFileSearch = payload.tools.some((tool) => tool.type === 'file_search');
+        if (!hasFileSearch) {
+            payload.vector_store_ids = [];
+        }
+
+        if (!this.isReasoningModel(model) || !payload.reasoning_effort || payload.reasoning_effort === 'auto') {
+            delete payload.reasoning_effort;
+        }
+
+        if (payload.metadata && typeof payload.metadata === 'object') {
+            const cleaned = {};
+            for (const key in payload.metadata) {
+                if (payload.metadata.hasOwnProperty(key)) {
+                    cleaned[key] = payload.metadata[key];
+                }
+            }
+            payload.metadata = cleaned;
+        }
+
+        return payload;
+    }
+    
     // ============ Assistant Management ============
     
-    async createAssistant(name, instructions, model = 'gpt-4o-mini', vectorStoreIds = []) {
+    async createAssistant(nameOrPayload, instructions, model = 'gpt-4o-mini', vectorStoreIds = []) {
+        let payload;
+        if (typeof nameOrPayload === 'object' && nameOrPayload !== null && !Array.isArray(nameOrPayload)) {
+            payload = { ...nameOrPayload };
+        } else {
+            payload = {
+                name: nameOrPayload,
+                instructions,
+                model,
+                vector_store_ids: vectorStoreIds
+            };
+        }
+
+        if (!payload.name) {
+            throw new Error('Assistant name is required');
+        }
+
+        const finalPayload = this.prepareAssistantPayload(payload, { fallbackModel: payload.model || model, includeModel: true });
+        console.log(`${this.logPrefix} createAssistant payload:`, JSON.stringify(finalPayload, null, 2));
+
         const response = await fetch(`${this.apiUrl}/assistants`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                name,
-                instructions,
-                model,
-                vector_store_ids: vectorStoreIds,
-                tools: this.defaultTools
-            })
+            body: JSON.stringify(finalPayload)
         });
         
         if (!response.ok) {
@@ -78,7 +178,9 @@ class AssistantManager {
         return await response.json();
     }
     
-    async updateAssistant(assistantId, updatesOrName, instructions, model, vectorStoreIds) {
+    async updateAssistant(assistantId, updatesOrName, instructions, model, vectorStoreIds, existingModel) {
+        console.log(`🔄 ${this.logPrefix} updateAssistant START @ ${new Date().toISOString()}`, { assistantId, updatesOrName, instructions, model, vectorStoreIds });
+        
         if (!assistantId) {
             throw new Error('Assistant ID is required');
         }
@@ -86,6 +188,7 @@ class AssistantManager {
         let payload;
         if (typeof updatesOrName === 'object' && updatesOrName !== null && !Array.isArray(updatesOrName)) {
             payload = { ...updatesOrName };
+            console.log(`${this.logPrefix} updateAssistant - using object payload:`, payload);
         } else {
             payload = {
                 name: updatesOrName,
@@ -93,48 +196,60 @@ class AssistantManager {
                 model,
                 vector_store_ids: vectorStoreIds
             };
+            console.log(`${this.logPrefix} updateAssistant - built payload:`, payload);
         }
 
-        // Ensure tools include file_search when vector stores are attached
-        if (payload.vector_store_ids && !payload.tools) {
-            payload.tools = this.defaultTools;
-        }
-        if (!payload.vector_store_ids && !payload.tools) {
-            payload.tools = this.defaultTools;
-        }
-
-        // Remove undefined/null keys
-        Object.keys(payload).forEach((key) => {
-            if (payload[key] === undefined || payload[key] === null) {
-                delete payload[key];
+        const includeModel = Object.prototype.hasOwnProperty.call(payload, 'model') && payload.model;
+        const fallbackModel = includeModel ? payload.model : (existingModel || undefined);
+        const finalPayload = this.prepareAssistantPayload(payload, {
+            fallbackModel: fallbackModel || 'gpt-4o-mini',
+            includeModel
+        });
+        Object.keys(finalPayload).forEach((key) => {
+            if (finalPayload[key] === undefined) {
+                delete finalPayload[key];
             }
         });
+        
+        console.log(`${this.logPrefix} updateAssistant - final payload:`, JSON.stringify(finalPayload, null, 2));
 
         const response = await fetch(`${this.apiUrl}/assistants/${assistantId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(finalPayload)
         });
+        
+        console.log(`${this.logPrefix} updateAssistant - response status:`, response.status);
         
         if (!response.ok) {
             const error = await response.json();
+            console.error(`${this.logPrefix} updateAssistant FAILED:`, error);
             throw new Error(error.error || 'Failed to update assistant');
         }
         
-        return await response.json();
+        const result = await response.json();
+        console.log(`${this.logPrefix} updateAssistant SUCCESS:`, result);
+        return result;
     }
     
     async deleteAssistant(assistantId) {
+        console.log(`🗑️ ${this.logPrefix} deleteAssistant START @ ${new Date().toISOString()}`, { assistantId });
+        
         const response = await fetch(`${this.apiUrl}/assistants/${assistantId}`, {
             method: 'DELETE'
         });
         
+        console.log(`${this.logPrefix} deleteAssistant - response status:`, response.status);
+        
         if (!response.ok) {
             const error = await response.json();
+            console.error(`${this.logPrefix} deleteAssistant FAILED:`, error);
             throw new Error(error.error || 'Failed to delete assistant');
         }
         
-        return await response.json();
+        const result = await response.json();
+        console.log(`${this.logPrefix} deleteAssistant SUCCESS:`, result);
+        return result;
     }
     
     // ============ Vector Store Management ============
@@ -166,14 +281,28 @@ class AssistantManager {
     }
     
     async listVectorStores(limit = 20) {
-        const response = await fetch(`${this.apiUrl}/vector-stores?limit=${limit}`);
+        // Add cache-busting timestamp to ensure fresh data
+        const timestamp = Date.now();
+        const response = await fetch(`${this.apiUrl}/vector-stores?limit=${limit}&_t=${timestamp}`, {
+            cache: 'no-cache',
+            headers: {
+                'Cache-Control': 'no-cache'
+            }
+        });
         
         if (!response.ok) {
+            // Handle 404 gracefully - OpenAI sometimes returns 404 when there are no vector stores
+            if (response.status === 404) {
+                console.warn(`${this.logPrefix} listVectorStores returned 404, returning empty list`);
+                return [];
+            }
             const error = await response.json();
             throw new Error(error.error || 'Failed to list vector stores');
         }
         
-        return await response.json();
+        const data = await response.json();
+        console.debug(`${this.logPrefix} listVectorStores returned`, { count: data.length, file_counts: data.map(vs => ({ id: vs.id, name: vs.name, file_counts: vs.file_counts })) });
+        return data;
     }
     
     async updateVectorStore(vectorStoreId, name) {
