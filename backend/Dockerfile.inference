@@ -1,0 +1,66 @@
+# Inference Dockerfile — ML inference service (~5-7GB)
+# Hosts 4 models at startup: BGE-M3, BGE-reranker, Docling (RapidOCR + VLM), img2table.
+# Optional: ColSmol-256M (~500MB) for visual page retrieval — set COLSMOL_ENABLED=true.
+# All models are pre-downloaded at build time and loaded at startup via FastAPI lifespan.
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HOME=/app/.cache/huggingface \
+    TRANSFORMERS_CACHE=/app/.cache/huggingface
+
+# Install system dependencies (includes OpenCV/img2table deps)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    libpq-dev \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Install Python dependencies (inference + ML)
+COPY pyproject.toml README.md ./
+RUN pip install --upgrade pip && \
+    pip install ".[inference,ml]"
+
+# Pre-download all ML models at build time so no network calls at runtime.
+# Models are cached in /app/.cache/huggingface and used offline at startup.
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+print('Downloading BGE-M3...'); \
+snapshot_download('BAAI/bge-m3'); \
+print('Downloading BGE-reranker-v2-m3...'); \
+snapshot_download('BAAI/bge-reranker-v2-m3'); \
+print('Downloading PP-OCRv5 ONNX models...'); \
+from huggingface_hub import hf_hub_download; \
+hf_hub_download('marsena/paddleocr-onnx-models', 'PP-OCRv5_server_det_infer.onnx'); \
+hf_hub_download('marsena/paddleocr-onnx-models', 'PP-OCRv5_server_rec_infer.onnx'); \
+hf_hub_download('marsena/paddleocr-onnx-models', 'PP-LCNet_x1_0_textline_ori_infer.onnx'); \
+print('All models pre-downloaded.'); \
+"
+
+# Copy application code
+COPY . .
+
+# Create non-root user and cache directory
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app/.cache/huggingface && \
+    chown -R appuser:appuser /app
+USER appuser
+
+# Expose port
+EXPOSE 8001
+
+# Health check — long start period for model loading
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=10 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Run the inference service (single worker — models loaded in-process)
+CMD ["uvicorn", "src.inference.app:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]

@@ -1,0 +1,541 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root, .dark {
+    /* Enhanced Dark Theme - Google/Amazon Inspired */
+    --background: 0 0% 4%;          /* #0a0a0a - True dark */
+    --foreground: 0 0% 98%;         /* White text */
+
+    --card: 0 0% 9.4%;              /* #18181b - Elevated surface */
+    --card-foreground: 0 0% 98%;
+
+    --popover: 0 0% 9.4%;           /* #18181b */
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 0 0% 98%;            /* White primary buttons */
+    --primary-foreground: 0 0% 4%;  /* Black text on primary */
+
+    --secondary: 0 0% 14.9%;        /* zinc-800 */
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 0 0% 14.9%;            /* zinc-800 */
+    --muted-foreground: 0 0% 63.9%; /* zinc-400 */
+
+    --accent: 160 84% 39%;          /* Emerald-500 for accents */
+    --accent-foreground: 0 0% 98%;
+
+    --destructive: 0 62.8% 50%;     /* Red for destructive */
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 14.9%;           /* zinc-800 borders */
+    --input: 0 0% 14.9%;            /* zinc-800 inputs */
+    --ring: 160 84% 39%;            /* Emerald ring */
+
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* ========================================
+   Enhanced Scrollbar - Minimal & Modern
+   ======================================== */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(113, 113, 122, 0.2);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.4);
+}
+
+/* Hide scrollbar utility */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ========================================
+   Typography Scale - Google Inspired
+   ======================================== */
+
+.text-display {
+  @apply text-2xl font-semibold tracking-tight;
+}
+
+.text-heading {
+  @apply text-[15px] font-semibold;
+}
+
+.text-body {
+  @apply text-[14px];
+}
+
+.text-body-sm {
+  @apply text-[13px];
+}
+
+.text-caption {
+  @apply text-[12px];
+}
+
+.text-label {
+  @apply text-[11px] font-semibold uppercase tracking-wider;
+}
+
+.text-micro {
+  @apply text-[10px] font-medium;
+}
+
+/* ========================================
+   Card Styles - Elevation System
+   ======================================== */
+
+.card-elevated {
+  @apply bg-card border border-border rounded-xl;
+}
+
+.card-elevated-hover {
+  @apply bg-card border border-border rounded-xl hover:border-zinc-700 transition-all;
+}
+
+.card-interactive {
+  @apply bg-card border border-border rounded-xl hover:border-zinc-700 hover:bg-zinc-800/30 transition-all cursor-pointer;
+}
+
+/* ========================================
+   Button Variants - Amazon Style
+   ======================================== */
+
+.btn-primary {
+  @apply bg-gradient-to-r from-emerald-500 to-cyan-500 text-white hover:from-emerald-400 hover:to-cyan-400 text-[13px] font-semibold px-4 py-2 rounded-xl transition-all shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40;
+}
+
+.btn-secondary {
+  @apply bg-primary text-primary-foreground hover:bg-primary/90 text-[13px] font-medium px-4 py-2 rounded-lg transition-colors;
+}
+
+.btn-outline {
+  @apply bg-transparent text-foreground border border-border hover:bg-muted hover:border-zinc-600 text-[13px] font-medium px-4 py-2 rounded-lg transition-all;
+}
+
+.btn-ghost {
+  @apply text-muted-foreground hover:text-foreground hover:bg-muted text-[13px] font-medium px-3 py-2 rounded-lg transition-all;
+}
+
+.btn-danger {
+  @apply text-red-400 hover:text-red-300 hover:bg-red-500/10 text-[13px] font-medium px-3 py-2 rounded-lg transition-all;
+}
+
+/* ========================================
+   Navigation Styles
+   ======================================== */
+
+.nav-item {
+  @apply flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium transition-all;
+}
+
+.nav-item-active {
+  @apply bg-white/10 text-white;
+}
+
+.nav-item-inactive {
+  @apply text-zinc-400 hover:text-white hover:bg-zinc-800/60;
+}
+
+/* Active indicator bar */
+.nav-active-indicator {
+  @apply absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 bg-emerald-400 rounded-r-full;
+}
+
+/* ========================================
+   Status Badges - Color Coded
+   ======================================== */
+
+.badge-success {
+  @apply bg-emerald-500/20 text-emerald-400 text-[11px] font-medium px-2 py-0.5 rounded;
+}
+
+.badge-warning {
+  @apply bg-yellow-500/20 text-yellow-400 text-[11px] font-medium px-2 py-0.5 rounded;
+}
+
+.badge-error {
+  @apply bg-red-500/20 text-red-400 text-[11px] font-medium px-2 py-0.5 rounded;
+}
+
+.badge-info {
+  @apply bg-blue-500/20 text-blue-400 text-[11px] font-medium px-2 py-0.5 rounded;
+}
+
+.badge-purple {
+  @apply bg-purple-500/20 text-purple-400 text-[11px] font-medium px-2 py-0.5 rounded;
+}
+
+/* Status dots */
+.status-dot {
+  @apply w-1.5 h-1.5 rounded-full;
+}
+
+.status-dot-active {
+  @apply bg-emerald-400;
+}
+
+.status-dot-pending {
+  @apply bg-yellow-400;
+}
+
+.status-dot-error {
+  @apply bg-red-400;
+}
+
+.status-dot-pulse {
+  @apply bg-emerald-400 animate-pulse;
+}
+
+/* ========================================
+   Input Styles - Modern & Clean
+   ======================================== */
+
+.input-standard {
+  @apply bg-input border border-border rounded-lg px-3 py-2 text-[13px] text-foreground placeholder-zinc-500 focus:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-500/50 transition-all;
+}
+
+.input-search {
+  @apply bg-input border border-border rounded-lg px-3 py-2 pl-10 text-[13px] text-foreground placeholder-zinc-500 focus:border-zinc-700 focus:outline-none transition-all;
+}
+
+/* ========================================
+   Table Styles
+   ======================================== */
+
+.table-modern {
+  @apply w-full text-[13px];
+}
+
+.table-modern th {
+  @apply text-left text-[11px] font-semibold text-zinc-500 uppercase tracking-wider px-4 py-3 border-b border-zinc-800/80;
+}
+
+.table-modern td {
+  @apply px-4 py-3 text-muted-foreground border-b border-border;
+}
+
+.table-modern tr:hover td {
+  @apply bg-zinc-800/30;
+}
+
+/* ========================================
+   Dropdown & Popover Styles
+   ======================================== */
+
+.dropdown-menu {
+  @apply bg-popover border border-border rounded-xl shadow-2xl overflow-hidden;
+}
+
+.dropdown-item {
+  @apply flex items-center gap-3 px-3 py-2.5 text-[13px] text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer;
+}
+
+.dropdown-item-danger {
+  @apply flex items-center gap-3 px-3 py-2.5 text-[13px] text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors cursor-pointer;
+}
+
+/* ========================================
+   Animations - Smooth & Purposeful
+   ======================================== */
+
+/* Fade in */
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Slide up */
+.animate-slide-up {
+  animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Slide down */
+.animate-slide-down {
+  animation: slideDown 0.2s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Scale in */
+.animate-scale-in {
+  animation: scaleIn 0.15s ease-out;
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Chat message appear */
+.message-appear {
+  animation: messageAppear 0.3s ease-out;
+}
+
+@keyframes messageAppear {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Typing indicator */
+.typing-indicator span {
+  animation: typingBounce 1.4s ease-in-out infinite;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes typingBounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-5px);
+  }
+}
+
+/* Shimmer loading effect */
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.05) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* Spin */
+.animate-spin-slow {
+  animation: spin 2s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ========================================
+   Focus States - Accessibility
+   ======================================== */
+
+.focus-ring {
+  @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0a];
+}
+
+/* ========================================
+   Section Dividers
+   ======================================== */
+
+.divider {
+  @apply border-t border-zinc-800/80;
+}
+
+.divider-vertical {
+  @apply w-px bg-zinc-800/80;
+}
+
+/* ========================================
+   Section Headers
+   ======================================== */
+
+.section-header {
+  @apply text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2;
+}
+
+.section-title {
+  @apply text-[15px] font-semibold text-foreground;
+}
+
+/* ========================================
+   Icon Containers - Semantic Colors
+   ======================================== */
+
+.icon-container-emerald {
+  @apply w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center text-emerald-400;
+}
+
+.icon-container-blue {
+  @apply w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400;
+}
+
+.icon-container-purple {
+  @apply w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center text-purple-400;
+}
+
+.icon-container-orange {
+  @apply w-8 h-8 rounded-lg bg-orange-500/20 flex items-center justify-center text-orange-400;
+}
+
+.icon-container-cyan {
+  @apply w-8 h-8 rounded-lg bg-cyan-500/20 flex items-center justify-center text-cyan-400;
+}
+
+/* ========================================
+   Keyboard Shortcuts
+   ======================================== */
+
+kbd {
+  @apply px-1.5 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-[10px] font-medium text-zinc-400;
+}
+
+/* ========================================
+   Empty States
+   ======================================== */
+
+.empty-state {
+  @apply flex flex-col items-center justify-center py-12 text-center;
+}
+
+.empty-state-icon {
+  @apply w-14 h-14 rounded-2xl bg-zinc-800 flex items-center justify-center mb-4;
+}
+
+.empty-state-title {
+  @apply text-[14px] font-medium text-foreground mb-2;
+}
+
+.empty-state-description {
+  @apply text-[13px] text-zinc-500 max-w-sm;
+}
+
+/* ========================================
+   Toast / Notification Styles
+   ======================================== */
+
+.toast-success {
+  @apply bg-emerald-500/10 border border-emerald-500/30 text-emerald-400;
+}
+
+.toast-error {
+  @apply bg-red-500/10 border border-red-500/30 text-red-400;
+}
+
+.toast-warning {
+  @apply bg-yellow-500/10 border border-yellow-500/30 text-yellow-400;
+}
+
+.toast-info {
+  @apply bg-blue-500/10 border border-blue-500/30 text-blue-400;
+}
+
+/* ========================================
+   Gradient Backgrounds
+   ======================================== */
+
+.gradient-emerald-cyan {
+  @apply bg-gradient-to-r from-emerald-500 to-cyan-500;
+}
+
+.gradient-purple-pink {
+  @apply bg-gradient-to-r from-purple-500 to-pink-500;
+}
+
+.gradient-blue-cyan {
+  @apply bg-gradient-to-r from-blue-500 to-cyan-500;
+}
+
+/* ========================================
+   Selection Styles
+   ======================================== */
+
+::selection {
+  background: rgba(16, 185, 129, 0.3);
+  color: white;
+}
+
+::-moz-selection {
+  background: rgba(16, 185, 129, 0.3);
+  color: white;
+}

@@ -1,0 +1,419 @@
+# =============================================================================
+# Rhasspy Voice Assistant - Docker Compose
+# =============================================================================
+# Multi-cloud local development and production deployment.
+#
+# Architecture:
+#   API (~500MB)       — FastAPI, auth, CRUD, SSE streaming
+#   Inference (~4-6GB) — BGE-M3, reranker, Docling, optional OCR/vision
+#   Celery (~500MB)    — Background document processing (calls inference)
+#
+# Usage:
+#   make up          # Pure local (filesystem storage)
+#   make up-aws      # AWS emulation (LocalStack)
+#   make up-azure    # Azure emulation (Azurite)
+#   make up-gcp      # GCP emulation (fake-gcs-server)
+#
+# Or directly:
+#   docker compose up                                    # Local only
+#   docker compose --profile aws up                      # + LocalStack
+#   docker compose --profile azure up                    # + Azurite
+#   docker compose --profile gcp up                      # + fake-gcs-server
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # Core Infrastructure (Required)
+  # ===========================================================================
+
+  # PostgreSQL (standard - vectors stored in Qdrant)
+  # Production: Use AWS RDS / Azure Database / Cloud SQL
+  postgres:
+    image: postgres:16-alpine
+    container_name: rhasspy_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rhasspy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rhasspy_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-rhasspy}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rhasspy} -d ${POSTGRES_DB:-rhasspy}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis for caching, sessions, and Celery broker
+  # Production: Use AWS ElastiCache / Azure Cache / Memorystore
+  redis:
+    image: redis:7-alpine
+    container_name: rhasspy_redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Qdrant Vector Database
+  # Production: Use Qdrant Cloud (https://cloud.qdrant.io)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: rhasspy_qdrant
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Cloud Emulators (Development Only - activated via profiles)
+  # ===========================================================================
+
+  # AWS LocalStack (S3, Secrets Manager)
+  localstack:
+    image: localstack/localstack:latest
+    container_name: rhasspy_localstack
+    ports:
+      - "4566:4566"
+      - "4510-4559:4510-4559"
+    environment:
+      - SERVICES=s3,secretsmanager
+      - DEBUG=0
+      - DATA_DIR=/var/lib/localstack/data
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    profiles:
+      - aws
+
+  # Azure Azurite (Blob, Queue, Table Storage)
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: rhasspy_azurite
+    ports:
+      - "10000:10000"  # Blob
+      - "10001:10001"  # Queue
+      - "10002:10002"  # Table
+    command: "azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --loose"
+    volumes:
+      - azurite_data:/data
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    profiles:
+      - azure
+
+  # GCP fake-gcs-server (Cloud Storage)
+  gcp-storage:
+    image: fsouza/fake-gcs-server:latest
+    container_name: rhasspy_gcp_storage
+    ports:
+      - "4443:4443"
+    command: ["-scheme", "http", "-port", "4443", "-external-url", "http://gcp-storage:4443"]
+    volumes:
+      - gcp_storage_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4443/storage/v1/b"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    profiles:
+      - gcp
+
+  # ===========================================================================
+  # ML Inference Service
+  # ===========================================================================
+
+  # Dedicated ML inference container (~5-7GB, ~6-8GB with ColSmol)
+  # Hosts 4 models at startup: BGE-M3, BGE-reranker, Docling (RapidOCR + VLM), img2table
+  # Optional: ColSmol-256M (~500MB) — set COLSMOL_ENABLED=true
+  inference:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.inference
+    container_name: rhasspy_inference
+    environment:
+      - DEVICE=${INFERENCE_DEVICE:-cpu}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - BGE_M3_BATCH_SIZE=4
+      - BGE_M3_MAX_LENGTH=1024
+      - COLSMOL_ENABLED=${COLSMOL_ENABLED:-false}
+      - DOCLING_DO_PICTURE_DESCRIPTION=${DOCLING_DO_PICTURE_DESCRIPTION:-true}
+      - DOCLING_IMAGES_SCALE=${DOCLING_IMAGES_SCALE:-2.0}
+      - DOCLING_DO_CHART_EXTRACTION=${DOCLING_DO_CHART_EXTRACTION:-true}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+    ports:
+      - "${INFERENCE_PORT:-8001}:8001"
+    volumes:
+      - inference_models:/app/.cache
+    deploy:
+      resources:
+        limits:
+          memory: 5G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 600s
+      retries: 10
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Application Services
+  # ===========================================================================
+
+  # FastAPI Backend (~500MB — no ML dependencies)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rhasspy_backend
+    environment:
+      # Application
+      - APP_ENV=${APP_ENV:-development}
+      - DEBUG=${DEBUG:-true}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+
+      # Database (PostgreSQL)
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-rhasspy}:${POSTGRES_PASSWORD:-rhasspy_secret}@postgres:5432/${POSTGRES_DB:-rhasspy}
+
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+
+      # Vector Database (Qdrant)
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+
+      # Inference Service
+      - INFERENCE_SERVICE_URL=http://inference:8001
+      - INFERENCE_SERVICE_TIMEOUT=${INFERENCE_SERVICE_TIMEOUT:-1200}
+
+      # ColSmol visual page retrieval
+      - COLSMOL_ENABLED=${COLSMOL_ENABLED:-false}
+
+      # Storage Configuration
+      - STORAGE_TYPE=${STORAGE_TYPE:-local}
+      - STORAGE_PATH=/app/storage
+
+      # AWS S3 / LocalStack
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}
+      - S3_USE_SSL=${S3_USE_SSL:-true}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+
+      # Azure Blob Storage / Azurite
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING:-}
+      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-}
+      - AZURE_STORAGE_ACCOUNT_NAME=${AZURE_STORAGE_ACCOUNT_NAME:-}
+      - AZURE_STORAGE_ACCOUNT_KEY=${AZURE_STORAGE_ACCOUNT_KEY:-}
+      - AZURE_STORAGE_ENDPOINT_URL=${AZURE_STORAGE_ENDPOINT_URL:-}
+
+      # GCP Cloud Storage / fake-gcs-server
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
+      - GCP_STORAGE_BUCKET=${GCP_STORAGE_BUCKET:-}
+      - GCP_CREDENTIALS_JSON=${GCP_CREDENTIALS_JSON:-}
+      - GCP_STORAGE_ENDPOINT_URL=${GCP_STORAGE_ENDPOINT_URL:-}
+
+      # LLM API Keys
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - COHERE_API_KEY=${COHERE_API_KEY:-}
+      - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      inference:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - backend_storage:/app/storage
+      - backend_cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    container_name: rhasspy_frontend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:${BACKEND_PORT:-8000}
+      - API_URL_INTERNAL=http://backend:8000
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+    command: sh -c "npm install && npm run dev"
+    volumes:
+      - ./frontend:/app
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Background Workers
+  # ===========================================================================
+
+  # Celery Worker for background tasks (document processing, embeddings)
+  # Lightweight (~500MB) — calls inference service for ML operations
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rhasspy_celery_worker
+    command: celery -A src.worker worker --loglevel=info --concurrency=4
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A src.worker inspect ping --timeout=5"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    environment:
+      # Database & Cache
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-rhasspy}:${POSTGRES_PASSWORD:-rhasspy_secret}@postgres:5432/${POSTGRES_DB:-rhasspy}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+
+      # Vector Database
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+
+      # Inference Service
+      - INFERENCE_SERVICE_URL=http://inference:8001
+      - INFERENCE_SERVICE_TIMEOUT=${INFERENCE_SERVICE_TIMEOUT:-1200}
+
+      # ColSmol visual page retrieval
+      - COLSMOL_ENABLED=${COLSMOL_ENABLED:-false}
+
+      # Storage
+      - STORAGE_TYPE=${STORAGE_TYPE:-local}
+      - STORAGE_PATH=/app/storage
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+
+      # Azure Blob Storage / Azurite
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING:-}
+      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-}
+      - AZURE_STORAGE_ACCOUNT_NAME=${AZURE_STORAGE_ACCOUNT_NAME:-}
+      - AZURE_STORAGE_ACCOUNT_KEY=${AZURE_STORAGE_ACCOUNT_KEY:-}
+      - AZURE_STORAGE_ENDPOINT_URL=${AZURE_STORAGE_ENDPOINT_URL:-}
+
+      # GCP Cloud Storage / fake-gcs-server
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
+      - GCP_STORAGE_BUCKET=${GCP_STORAGE_BUCKET:-}
+      - GCP_CREDENTIALS_JSON=${GCP_CREDENTIALS_JSON:-}
+      - GCP_STORAGE_ENDPOINT_URL=${GCP_STORAGE_ENDPOINT_URL:-}
+
+      # LLM API Keys (for embeddings)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - COHERE_API_KEY=${COHERE_API_KEY:-}
+      - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      inference:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - backend_storage:/app/storage
+    restart: unless-stopped
+
+  # Celery Beat for scheduled tasks
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rhasspy_celery_beat
+    command: celery -A src.worker beat --loglevel=info
+    healthcheck:
+      disable: true
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-rhasspy}:${POSTGRES_PASSWORD:-rhasspy_secret}@postgres:5432/${POSTGRES_DB:-rhasspy}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  localstack_data:
+  azurite_data:
+  gcp_storage_data:
+  backend_storage:
+  backend_cache:
+  inference_models:
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  default:
+    name: rhasspy_network

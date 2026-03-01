@@ -1,0 +1,130 @@
+version: "3.8"
+
+# Test infrastructure for comprehensive E2E testing
+# Includes: LocalStack (AWS), Azurite (Azure), GCP emulators, PostgreSQL, Redis, Qdrant
+
+services:
+  # PostgreSQL for testing
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: rhasspy_postgres_test
+    environment:
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: test_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user -d test_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  # Redis for caching and vector storage testing
+  redis-test:
+    image: redis/redis-stack:latest
+    container_name: rhasspy_redis_test
+    ports:
+      - "6380:6379"
+      - "8001:8001"
+    environment:
+      - REDIS_ARGS=--appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # LocalStack - AWS emulator (S3, Secrets Manager, STS, IAM)
+  localstack:
+    image: localstack/localstack:3.0
+    container_name: rhasspy_localstack
+    ports:
+      - "4566:4566"
+      - "4510-4559:4510-4559"
+    environment:
+      - SERVICES=s3,secretsmanager,sts,iam,ec2,eks,rds
+      - DEBUG=1
+      - PERSISTENCE=0
+      - AWS_DEFAULT_REGION=us-east-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./docker/localstack:/etc/localstack/init/ready.d"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Azurite - Azure Storage emulator
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: rhasspy_azurite
+    ports:
+      - "10000:10000"  # Blob
+      - "10001:10001"  # Queue
+      - "10002:10002"  # Table
+    command: "azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --loose"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # GCP Emulator - Storage
+  gcp-storage:
+    image: fsouza/fake-gcs-server:latest
+    container_name: rhasspy_gcp_storage
+    ports:
+      - "4443:4443"
+    command: ["-scheme", "http", "-port", "4443", "-external-url", "http://localhost:4443"]
+    volumes:
+      - gcp_storage_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4443/storage/v1/b"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # GCP Pub/Sub Emulator
+  gcp-pubsub:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    container_name: rhasspy_gcp_pubsub
+    ports:
+      - "8085:8085"
+    command: ["gcloud", "beta", "emulators", "pubsub", "start", "--host-port=0.0.0.0:8085", "--project=test-project"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Qdrant - Vector database for testing
+  qdrant-test:
+    image: qdrant/qdrant:latest
+    container_name: rhasspy_qdrant_test
+    ports:
+      - "6334:6333"
+      - "6335:6334"
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    volumes:
+      - qdrant_test_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  gcp_storage_data:
+  qdrant_test_data:
+
+networks:
+  default:
+    name: rhasspy_test_network
