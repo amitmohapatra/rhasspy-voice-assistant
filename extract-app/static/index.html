@@ -153,10 +153,10 @@ function DocumentViewer({ imageB64, chunks, hoveredChunk, onHoverChunk }) {
                   key={i}
                   className="bbox-rect rounded"
                   style={{
-                    left:            `${b.x0 * 100}%`,
-                    top:             `${b.y0 * 100}%`,
-                    width:           `${(b.x1 - b.x0) * 100}%`,
-                    height:          `${(b.y1 - b.y0) * 100}%`,
+                    left:            `${b.x0 / 10}%`,
+                    top:             `${b.y0 / 10}%`,
+                    width:           `${(b.x1 - b.x0) / 10}%`,
+                    height:          `${(b.y1 - b.y0) / 10}%`,
                     border:          `2px solid ${c.border}`,
                     backgroundColor: isHovered ? c.border + '30' : c.bg,
                     opacity:         isHovered ? 1 : 0.75,

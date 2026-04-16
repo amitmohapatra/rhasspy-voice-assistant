@@ -164,9 +164,9 @@ You are a document layout analyst. Carefully examine EVERY part of this document
 COORDINATE SYSTEM — read carefully before writing any bbox:
   (x0=0.0, y0=0.0) = TOP-LEFT corner of the image
   (x1=1.0, y1=1.0) = BOTTOM-RIGHT corner of the image
-  x values → horizontal fraction of image WIDTH  (left=0.0, right=1.0)
-  y values → vertical fraction of image HEIGHT   (top=0.0, bottom=1.0)
-  Example: a region in the top-right quarter has roughly x0=0.5, y0=0.0, x1=1.0, y1=0.25
+  x values → horizontal position out of 1000  (left=0, right=1000)
+  y values → vertical position out of 1000    (top=0, bottom=1000)
+  Example: a region in the top-right quarter has roughly x0=500, y0=0, x1=1000, y1=250
 
 BBOX RULES — tight, not padded:
   - y0 = top edge of the FIRST line of text/content in the region
@@ -192,7 +192,7 @@ Return ONLY valid JSON — no markdown fences, no explanation:
       "label": "<short human label e.g. 'Invoice header' or 'Vendor address'>",
       "fields": ["<field_name_from_fields_list>", ...],
       "text": "<key values visible in this region only, \\n for line breaks — keep brief>",
-      "bbox": {"x0": <0.0-1.0>, "y0": <0.0-1.0>, "x1": <0.0-1.0>, "y1": <0.0-1.0>}
+      "bbox": {"x0": <0-1000>, "y0": <0-1000>, "x1": <0-1000>, "y1": <0-1000>}
     }
   ]
 }
@@ -447,14 +447,14 @@ def _build_field_view_prompt(schema: dict) -> str:
         else:
             hint = ""
         return (f'    "{name}": {{"value": <value or null>, '
-                f'"bbox": {{"left":<0-1>,"top":<0-1>,"right":<0-1>,"bottom":<0-1>}}, '
+                f'"bbox": {{"left":<0-1000>,"top":<0-1000>,"right":<0-1000>,"bottom":<0-1000>}}, '
                 f'"confidence": <0-1>, "section": "<chunk label>"}}{hint}')
 
     field_lines = "\n".join(_field_hint(f) for f in fields)
 
     if has_items and item_cols:
         cols_ex = ", ".join(
-            f'"{c}": {{"value": <value>, "bbox": {{"left":<0-1>,"top":<0-1>,"right":<0-1>,"bottom":<0-1>}}, "confidence": <0-1>}}'
+            f'"{c}": {{"value": <value>, "bbox": {{"left":<0-1000>,"top":<0-1000>,"right":<0-1000>,"bottom":<0-1000>}}, "confidence": <0-1>}}'
             for c in item_cols
         )
         items_blk = f'  "line_items": [\n    {{{cols_ex}}},\n    ...\n  ]'
@@ -465,11 +465,11 @@ def _build_field_view_prompt(schema: dict) -> str:
 You are extracting structured data from a {doc_type}. You have the document image AND OCR text.
 
 COORDINATE SYSTEM — read carefully before writing any bbox:
-  (left=0.0, top=0.0) = TOP-LEFT corner of the image
-  (right=1.0, bottom=1.0) = BOTTOM-RIGHT corner of the image
-  left/right → horizontal fraction of image WIDTH   (left edge=0.0, right edge=1.0)
-  top/bottom → vertical fraction of image HEIGHT    (top edge=0.0, bottom edge=1.0)
-  Example: a value in the top-right quarter is roughly left=0.5 top=0.0 right=1.0 bottom=0.25
+  (left=0, top=0) = TOP-LEFT corner of the image
+  (right=1000, bottom=1000) = BOTTOM-RIGHT corner of the image
+  left/right → horizontal position out of 1000  (left edge=0, right edge=1000)
+  top/bottom → vertical position out of 1000    (top edge=0, bottom edge=1000)
+  Example: a value in the top-right quarter is roughly left=500 top=0 right=1000 bottom=250
 
 BBOX RULES — tight around the VALUE text only:
   - top    = top edge of the value text (not the field label)
@@ -520,10 +520,10 @@ async def _run_vlm_field_bboxes(image_b64: str, schema: dict, context: str, cfg:
 
     def _norm_bb(bb: dict) -> dict:
         return {
-            "left":   max(0.0, min(1.0, float(bb.get("left",   0)))),
-            "top":    max(0.0, min(1.0, float(bb.get("top",    0)))),
-            "right":  max(0.0, min(1.0, float(bb.get("right",  1)))),
-            "bottom": max(0.0, min(1.0, float(bb.get("bottom", 1)))),
+            "left":   max(0.0, min(1.0, float(bb.get("left",    0)) / 1000)),
+            "top":    max(0.0, min(1.0, float(bb.get("top",     0)) / 1000)),
+            "right":  max(0.0, min(1.0, float(bb.get("right",  1000)) / 1000)),
+            "bottom": max(0.0, min(1.0, float(bb.get("bottom", 1000)) / 1000)),
         }
 
     try:
