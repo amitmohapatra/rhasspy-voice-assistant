@@ -1,0 +1,2064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DocAI</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .drop-active { border-color: #6366f1 !important; background: #eef2ff !important; }
+    .bbox-layer { position: absolute; inset: 0; pointer-events: none; }
+    .bbox-rect  { position: absolute; cursor: pointer; pointer-events: all; transition: opacity 0.15s; }
+    .spinner    { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .fade-in    { animation: fadeIn 0.3s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useCallback, useRef, useEffect } = React;
+
+// ── Chunk type color palette ──────────────────────────────────────────────────
+const COLORS = {
+  header:           { bg: '#DBEAFE55', border: '#3B82F6', badge: 'bg-blue-100 text-blue-800' },
+  vendor_info:      { bg: '#D1FAE555', border: '#10B981', badge: 'bg-emerald-100 text-emerald-800' },
+  buyer_info:       { bg: '#FEF3C755', border: '#F59E0B', badge: 'bg-amber-100 text-amber-800' },
+  line_items_table: { bg: '#EDE9FE55', border: '#8B5CF6', badge: 'bg-violet-100 text-violet-800' },
+  totals:           { bg: '#FEE2E255', border: '#EF4444', badge: 'bg-red-100 text-red-800' },
+  payment_info:     { bg: '#CFFAFE55', border: '#06B6D4', badge: 'bg-cyan-100 text-cyan-800' },
+  notes:            { bg: '#F3F4F655', border: '#9CA3AF', badge: 'bg-gray-100 text-gray-700' },
+  signature:        { bg: '#FCE7F355', border: '#EC4899', badge: 'bg-pink-100 text-pink-800' },
+  footer:           { bg: '#ECFCCB55', border: '#84CC16', badge: 'bg-lime-100 text-lime-800' },
+  other:            { bg: '#F9FAFB55', border: '#D1D5DB', badge: 'bg-gray-100 text-gray-600' },
+};
+const chunkColor = (type) => COLORS[type] || COLORS.other;
+
+// ── Stepper ───────────────────────────────────────────────────────────────────
+function Stepper({ phase }) {
+  const steps = [
+    { id: 'upload',  label: 'Upload' },
+    { id: 'parse',   label: 'Pass 1 · OCR + Schema' },
+    { id: 'extract', label: 'Pass 2 · Extract' },
+    { id: 'done',    label: 'Results' },
+  ];
+  const activeIdx = {
+    idle: 0, page_select: 0, parsing: 1, schema_review: 1, extracting: 2, done: 3,
+  }[phase] ?? 0;
+
+  return (
+    <div className="flex items-center gap-0">
+      {steps.map((s, i) => {
+        const done    = i < activeIdx;
+        const current = i === activeIdx;
+        return (
+          <React.Fragment key={s.id}>
+            {i > 0 && (
+              <div className={`flex-1 h-0.5 ${done ? 'bg-indigo-500' : 'bg-gray-200'}`} />
+            )}
+            <div className="flex items-center gap-1.5">
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold
+                ${done    ? 'bg-indigo-500 text-white'
+                : current ? 'bg-indigo-600 text-white ring-2 ring-indigo-300'
+                :           'bg-gray-200 text-gray-500'}`}>
+                {done ? '✓' : i + 1}
+              </div>
+              <span className={`text-xs font-medium whitespace-nowrap
+                ${current ? 'text-indigo-700' : done ? 'text-indigo-500' : 'text-gray-400'}`}>
+                {s.label}
+              </span>
+            </div>
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Upload zone ───────────────────────────────────────────────────────────────
+function UploadZone({ onUpload, disabled }) {
+  const inputRef = useRef();
+  const [dragging, setDragging] = useState(false);
+
+  const handle = (file) => {
+    if (file && !disabled) onUpload(file);
+  };
+
+  return (
+    <div className="flex-1 flex items-center justify-center p-12">
+      <div
+        className={`border-2 border-dashed rounded-2xl p-16 text-center cursor-pointer transition-all
+          ${dragging ? 'border-indigo-500 bg-indigo-50' : 'border-gray-300 bg-white hover:border-indigo-400 hover:bg-gray-50'}`}
+        onClick={() => !disabled && inputRef.current.click()}
+        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault(); setDragging(false);
+          handle(e.dataTransfer.files[0]);
+        }}
+      >
+        <div className="text-5xl mb-4">📄</div>
+        <p className="text-lg font-semibold text-gray-700 mb-1">Drop your document here</p>
+        <p className="text-sm text-gray-400 mb-4">or click to browse</p>
+        <p className="text-xs text-gray-300">PNG · JPG · JPEG · TIFF · BMP · WEBP · PDF</p>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".png,.jpg,.jpeg,.tiff,.tif,.bmp,.webp,.pdf"
+          className="hidden"
+          onChange={(e) => handle(e.target.files[0])}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Document viewer with bbox overlay ────────────────────────────────────────
+function DocumentViewer({ imageB64, chunks, hoveredChunk, onHoverChunk }) {
+  const [imgSize, setImgSize] = useState(null);
+  const containerRef = useRef();
+
+  return (
+    <div className="flex flex-col bg-white border-r border-gray-200" style={{ width: '55%', minWidth: 380 }}>
+      {/* Toolbar */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-gray-50">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Document</span>
+        <span className="text-xs text-gray-400">{chunks.length} region{chunks.length !== 1 ? 's' : ''} detected</span>
+      </div>
+
+      {/* Image + overlay */}
+      <div className="flex-1 overflow-auto p-4">
+        <div ref={containerRef} className="relative inline-block w-full">
+          <img
+            src={imageB64}
+            alt="Document"
+            className="w-full h-auto block rounded shadow-sm"
+            onLoad={(e) => setImgSize({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
+          />
+          {/* Bbox overlay */}
+          <div className="bbox-layer">
+            {chunks.map((ch, i) => {
+              const b = ch.bbox || {};
+              if (!b.x0 && !b.y0 && !b.x1 && !b.y1) return null;
+              const c = chunkColor(ch.type);
+              const isHovered = hoveredChunk === i;
+              return (
+                <div
+                  key={i}
+                  className="bbox-rect rounded"
+                  style={{
+                    left:            `${b.x0 * 100}%`,
+                    top:             `${b.y0 * 100}%`,
+                    width:           `${(b.x1 - b.x0) * 100}%`,
+                    height:          `${(b.y1 - b.y0) * 100}%`,
+                    border:          `2px solid ${c.border}`,
+                    backgroundColor: isHovered ? c.border + '30' : c.bg,
+                    opacity:         isHovered ? 1 : 0.75,
+                    zIndex:          isHovered ? 10 : 1,
+                  }}
+                  onMouseEnter={() => onHoverChunk(i)}
+                  onMouseLeave={() => onHoverChunk(null)}
+                >
+                  {isHovered && (
+                    <div
+                      className="absolute top-0 left-0 text-xs px-1.5 py-0.5 rounded-br font-medium"
+                      style={{ backgroundColor: c.border, color: '#fff', whiteSpace: 'nowrap' }}
+                    >
+                      {ch.label || ch.type}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Chunk legend */}
+      {chunks.length > 0 && (
+        <div className="px-4 py-3 border-t border-gray-100 flex flex-wrap gap-1.5">
+          {chunks.map((ch, i) => {
+            const c = chunkColor(ch.type);
+            return (
+              <button
+                key={i}
+                className={`text-xs px-2 py-0.5 rounded-full border transition-all
+                  ${hoveredChunk === i ? 'ring-1 ring-offset-1' : ''}`}
+                style={{
+                  borderColor:     c.border,
+                  backgroundColor: hoveredChunk === i ? c.border + '20' : 'transparent',
+                  color:           c.border,
+                  ringColor:       c.border,
+                }}
+                onMouseEnter={() => onHoverChunk(i)}
+                onMouseLeave={() => onHoverChunk(null)}
+              >
+                {ch.label || ch.type}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Schema editor ─────────────────────────────────────────────────────────────
+function SchemaEditor({ schema, onChange, onExtract, onFieldViewExtract, extracting, hoveredChunk, onHoverChunk }) {
+  const updateDocType = (v) => onChange({ ...schema, document_type: v });
+
+  const updateField = (i, key, val) => {
+    const fields = schema.fields.map((f, idx) =>
+      idx === i ? { ...f, [key]: val } : f
+    );
+    onChange({ ...schema, fields });
+  };
+
+  const removeField = (i) => {
+    onChange({ ...schema, fields: schema.fields.filter((_, idx) => idx !== i) });
+  };
+
+  const addField = () => {
+    onChange({
+      ...schema,
+      fields: [...schema.fields, { name: 'new_field', description: '' }],
+    });
+  };
+
+  const updateLineItemCols = (val) => {
+    const cols = val.split(',').map(s => s.trim()).filter(Boolean);
+    onChange({ ...schema, line_item_columns: cols.length ? cols : null });
+  };
+
+  // Map field → chunk index for highlighting
+  const fieldToChunk = {};
+  (schema.layout_chunks || []).forEach((ch, ci) => {
+    (ch.fields || []).forEach(fn => { fieldToChunk[fn] = ci; });
+  });
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Doc type */}
+      <div className="px-5 py-4 border-b border-gray-100">
+        <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+          Document Type
+        </label>
+        <input
+          className="w-full px-3 py-1.5 rounded-lg border border-gray-200 text-sm font-mono
+                     focus:outline-none focus:ring-2 focus:ring-indigo-300"
+          value={schema.document_type || ''}
+          onChange={(e) => updateDocType(e.target.value)}
+        />
+      </div>
+
+      {/* Fields */}
+      <div className="flex-1 overflow-y-auto px-5 py-3">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Fields ({schema.fields?.length || 0})
+          </span>
+          <button
+            onClick={addField}
+            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium px-2 py-0.5
+                       rounded border border-indigo-200 hover:border-indigo-400 transition-colors"
+          >
+            + Add field
+          </button>
+        </div>
+
+        <div className="space-y-1.5">
+          {(schema.fields || []).map((f, i) => {
+            const chunkIdx = fieldToChunk[f.name];
+            const isHovered = hoveredChunk === chunkIdx && chunkIdx !== undefined;
+            const c = chunkIdx !== undefined ? chunkColor((schema.layout_chunks || [])[chunkIdx]?.type) : null;
+            return (
+              <div
+                key={i}
+                className={`flex items-start gap-2 rounded-lg px-2 py-1.5 transition-colors
+                  ${isHovered ? 'bg-indigo-50' : 'hover:bg-gray-50'}`}
+                onMouseEnter={() => chunkIdx !== undefined && onHoverChunk(chunkIdx)}
+                onMouseLeave={() => onHoverChunk(null)}
+              >
+                {c && (
+                  <div
+                    className="w-1.5 h-full min-h-[20px] rounded-full flex-shrink-0 mt-1"
+                    style={{ backgroundColor: c.border }}
+                  />
+                )}
+                <div className="flex-1 min-w-0">
+                  <input
+                    className="w-full text-xs font-mono px-2 py-1 rounded border border-gray-200
+                               focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
+                    value={f.name || ''}
+                    onChange={(e) => updateField(i, 'name', e.target.value)}
+                  />
+                  {f.description && (
+                    <p className="text-xs text-gray-400 mt-0.5 truncate px-1">{f.description}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => removeField(i)}
+                  className="text-gray-300 hover:text-red-400 flex-shrink-0 mt-1 transition-colors"
+                  title="Remove field"
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Line item columns */}
+        {schema.has_line_items && (
+          <div className="mt-4 pt-4 border-t border-gray-100">
+            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+              Line Item Columns
+            </label>
+            <input
+              className="w-full px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-mono
+                         focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              value={(schema.line_item_columns || []).join(', ')}
+              onChange={(e) => updateLineItemCols(e.target.value)}
+              placeholder="description, qty, unit_price, total"
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Run buttons */}
+      <div className="px-5 py-4 border-t border-gray-100 bg-gray-50">
+        <div className="flex gap-2">
+          <button
+            onClick={onExtract}
+            disabled={extracting}
+            className={`flex-1 py-2.5 rounded-xl text-sm font-semibold text-white transition-all
+              ${extracting
+                ? 'bg-indigo-300 cursor-not-allowed'
+                : 'bg-indigo-600 hover:bg-indigo-700 shadow-sm hover:shadow'}`}
+          >
+            {extracting
+              ? <span className="flex items-center justify-center gap-2">
+                  <svg className="spinner w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <circle cx="12" cy="12" r="10" strokeWidth="3" strokeDasharray="32" strokeLinecap="round"/>
+                  </svg>
+                  Running…
+                </span>
+              : '▶ Extract'
+            }
+          </button>
+          <button
+            onClick={onFieldViewExtract}
+            disabled={extracting}
+            className={`flex-1 py-2.5 rounded-xl text-sm font-semibold text-white transition-all
+              ${extracting
+                ? 'bg-violet-300 cursor-not-allowed'
+                : 'bg-violet-600 hover:bg-violet-700 shadow-sm hover:shadow'}`}
+          >
+            {extracting ? '…' : '⊞ Field View'}
+          </button>
+        </div>
+        <p className="text-xs text-gray-400 text-center mt-2">
+          Edit fields above before extracting
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Results panel ─────────────────────────────────────────────────────────────
+// ── JSON value token (syntax colouring) ──────────────────────────────────────
+function ValueToken({ value }) {
+  if (value === null || value === undefined)
+    return <span style={{ color: '#6B7280' }}>null</span>;
+  if (typeof value === 'number')
+    return <span style={{ color: '#FB923C' }}>{value}</span>;
+  if (typeof value === 'boolean')
+    return <span style={{ color: '#C084FC' }}>{String(value)}</span>;
+  const s = String(value);
+  return <span style={{ color: '#86EFAC' }}>"{s}"</span>;
+}
+
+// ── JSON viewer with hover-to-highlight ───────────────────────────────────────
+function JsonViewer({ result, schema, hoveredChunk, onHoverChunk }) {
+  const chunks = schema?.layout_chunks || [];
+
+  // Primary: field name → chunk index from VLM schema (authoritative, doesn't depend on LLM label matching)
+  const fieldToChunk = {};
+  chunks.forEach((ch, i) => {
+    (ch.fields || []).forEach(fn => { fieldToChunk[fn] = i; });
+  });
+
+  // Fallback: chunk label → index (case-insensitive) for any field the VLM didn't list
+  const labelToChunk = {};
+  chunks.forEach((ch, i) => {
+    const key = (ch.label || ch.type || '').toLowerCase();
+    labelToChunk[key] = i;
+  });
+
+  const resolveChunk = (fieldName, section) => {
+    // 1. VLM schema field list (most reliable)
+    if (fieldToChunk[fieldName] !== undefined) return fieldToChunk[fieldName];
+    // 2. LLM-returned section label (case-insensitive fallback)
+    if (section) return labelToChunk[section.toLowerCase()];
+    return undefined;
+  };
+
+  // line_items_table chunk index (for hovering line item rows)
+  const lineItemsChunkIdx = chunks.findIndex(ch => ch.type === 'line_items_table');
+
+  const fields    = result.fields || {};
+  const lineItems = result.line_items || [];
+  const cols      = schema?.line_item_columns
+    || (lineItems.length ? Object.keys(lineItems[0]) : []);
+
+  const fieldEntries = Object.entries(fields);
+  const lastFieldIdx = fieldEntries.length - 1;
+
+  // Shared row style
+  const rowBase = 'flex items-baseline gap-0 px-2 py-0.5 rounded cursor-default transition-colors group select-none';
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden fade-in bg-gray-950">
+      {/* Toolbar */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          Extraction result
+        </span>
+        <span className="text-xs text-gray-600">
+          {fieldEntries.filter(([, v]) => v.value !== null).length}/{fieldEntries.length} fields
+          {lineItems.length > 0 && ` · ${lineItems.length} line items`}
+        </span>
+      </div>
+
+      {/* JSON body */}
+      <div className="flex-1 overflow-y-auto p-4 font-mono text-sm leading-relaxed">
+        <span style={{ color: '#9CA3AF' }}>{'{'}</span>
+
+        {/* document_type */}
+        <div className="pl-4">
+          <span style={{ color: '#7DD3FC' }}>"document_type"</span>
+          <span style={{ color: '#9CA3AF' }}>: </span>
+          <span style={{ color: '#86EFAC' }}>"{result.document_type}"</span>
+          <span style={{ color: '#4B5563' }}>,</span>
+        </div>
+
+        {/* fields */}
+        <div className="pl-4">
+          <span style={{ color: '#7DD3FC' }}>"fields"</span>
+          <span style={{ color: '#9CA3AF' }}>: {'{'}</span>
+        </div>
+
+        <div className="pl-8">
+          {fieldEntries.map(([name, data], i) => {
+            const chunkIdx = resolveChunk(name, data.section);
+            const hasChunk = chunkIdx !== undefined && chunkIdx >= 0;
+            const isHovered = hoveredChunk === chunkIdx && hasChunk;
+            const c = hasChunk
+              ? chunkColor((schema?.layout_chunks || [])[chunkIdx]?.type)
+              : null;
+
+            return (
+              <div
+                key={name}
+                className={rowBase}
+                style={{ backgroundColor: isHovered ? '#1E3A5F' : undefined }}
+                onMouseEnter={() => hasChunk && onHoverChunk(chunkIdx)}
+                onMouseLeave={() => onHoverChunk(null)}
+              >
+                {/* chunk colour pip */}
+                <span
+                  className="inline-block w-1.5 h-1.5 rounded-full mr-2 flex-shrink-0 self-center"
+                  style={{ backgroundColor: c ? c.border : 'transparent', opacity: c ? 1 : 0 }}
+                />
+                <span style={{ color: '#93C5FD' }}>"{name}"</span>
+                <span style={{ color: '#9CA3AF' }}>: </span>
+                <ValueToken value={data.value} />
+                {i < lastFieldIdx && <span style={{ color: '#4B5563' }}>,</span>}
+                {/* section badge — shown on hover */}
+                {data.section && c && (
+                  <span
+                    className="ml-3 text-xs px-1.5 py-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
+                    style={{ backgroundColor: c.border + '25', color: c.border }}
+                  >
+                    {data.section}
+                  </span>
+                )}
+                {/* confidence badge for field-view results */}
+                {data.confidence != null && (
+                  <span
+                    className="ml-2 text-xs px-1.5 py-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
+                    style={{ backgroundColor: '#8B5CF620', color: '#8B5CF6' }}
+                  >
+                    {Math.round(data.confidence * 100)}% conf
+                  </span>
+                )}
+                {data.value === null && (
+                  <span className="ml-2 text-xs text-gray-700 opacity-0 group-hover:opacity-100 transition-opacity">
+                    not found
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="pl-4">
+          <span style={{ color: '#9CA3AF' }}>{'}'}</span>
+          {lineItems.length > 0 && <span style={{ color: '#4B5563' }}>,</span>}
+        </div>
+
+        {/* line_items */}
+        {lineItems.length > 0 && (
+          <>
+            <div className="pl-4 mt-1">
+              <span style={{ color: '#7DD3FC' }}>"line_items"</span>
+              <span style={{ color: '#9CA3AF' }}>: [</span>
+            </div>
+
+            <div className="pl-8">
+              {lineItems.map((row, ri) => {
+                const isHovered = hoveredChunk === lineItemsChunkIdx && lineItemsChunkIdx >= 0;
+                const c = lineItemsChunkIdx >= 0
+                  ? chunkColor((schema?.layout_chunks || [])[lineItemsChunkIdx]?.type)
+                  : null;
+                const rowEntries = cols.length
+                  ? cols.map(col => [col, row[col]])
+                  : Object.entries(row);
+                const lastColIdx = rowEntries.length - 1;
+
+                return (
+                  <div
+                    key={ri}
+                    className={rowBase + ' flex-wrap items-start'}
+                    style={{ backgroundColor: isHovered ? '#1A2F1A' : undefined }}
+                    onMouseEnter={() => lineItemsChunkIdx >= 0 && onHoverChunk(lineItemsChunkIdx)}
+                    onMouseLeave={() => onHoverChunk(null)}
+                  >
+                    <span style={{ color: '#9CA3AF' }}>{'{ '}</span>
+                    {rowEntries.map(([k, v], ci) => (
+                      <span key={k}>
+                        <span style={{ color: '#93C5FD' }}>"{k}"</span>
+                        <span style={{ color: '#9CA3AF' }}>: </span>
+                        <ValueToken value={v !== undefined ? v : null} />
+                        {ci < lastColIdx && <span style={{ color: '#4B5563' }}>, </span>}
+                      </span>
+                    ))}
+                    <span style={{ color: '#9CA3AF' }}>{' }'}</span>
+                    {ri < lineItems.length - 1 && <span style={{ color: '#4B5563' }}>,</span>}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="pl-4">
+              <span style={{ color: '#9CA3AF' }}>]</span>
+            </div>
+          </>
+        )}
+
+        <span style={{ color: '#9CA3AF' }}>{'}'}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Loading state ─────────────────────────────────────────────────────────────
+function LoadingPane({ message, sub }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full gap-4 text-center p-8">
+      <svg className="spinner w-8 h-8 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <circle cx="12" cy="12" r="10" strokeWidth="2.5" strokeDasharray="32" strokeLinecap="round"/>
+      </svg>
+      <p className="text-sm font-semibold text-gray-700">{message}</p>
+      {sub && <p className="text-xs text-gray-400">{sub}</p>}
+    </div>
+  );
+}
+
+// ── DIVA: document viewer with field-level bboxes ────────────────────────────
+function DivaDocViewer({ imageB64, fields, hoveredField, onHoverField }) {
+  const regularFields = fields.filter(f => f.line_item_id === -1);
+  const lineItemFields = fields.filter(f => f.line_item_id >= 0);
+
+  const bboxDiv = (f, i, color) => {
+    const b = f.bbox || {};
+    const isHovered = hoveredField === i;
+    return (
+      <div
+        key={i}
+        className="bbox-rect rounded"
+        style={{
+          left:            `${b.left * 100}%`,
+          top:             `${b.top * 100}%`,
+          width:           `${(b.right - b.left) * 100}%`,
+          height:          `${(b.bottom - b.top) * 100}%`,
+          border:          `1.5px solid ${color}`,
+          backgroundColor: isHovered ? color + '35' : color + '12',
+          zIndex:          isHovered ? 10 : 1,
+          pointerEvents:   'all',
+        }}
+        onMouseEnter={() => onHoverField(i)}
+        onMouseLeave={() => onHoverField(null)}
+      >
+        {isHovered && (
+          <div className="absolute -top-5 left-0 text-xs px-1.5 py-0.5 rounded-b font-medium whitespace-nowrap"
+            style={{ backgroundColor: color, color: '#fff' }}>
+            {f.name}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex flex-col bg-white border-r border-gray-200 overflow-hidden" style={{ width: '55%', minWidth: 320 }}>
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-gray-50">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Document</span>
+        <span className="text-xs text-gray-400">
+          {regularFields.length} fields · {lineItemFields.length} line item cells
+        </span>
+      </div>
+      <div className="flex-1 overflow-auto p-4">
+        <div className="relative inline-block w-full">
+          <img src={imageB64} alt="Document" className="w-full h-auto block rounded shadow-sm" />
+          <div className="bbox-layer">
+            {regularFields.map((f, i) => bboxDiv(f, i, '#F97316'))}
+            {lineItemFields.map((f, i) =>
+              bboxDiv(f, regularFields.length + i, '#8B5CF6')
+            )}
+          </div>
+        </div>
+      </div>
+      {/* Legend */}
+      <div className="px-4 py-2 border-t border-gray-100 flex gap-3">
+        <span className="text-xs flex items-center gap-1">
+          <span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: '#F97316' }}/>
+          <span className="text-gray-500">Fields</span>
+        </span>
+        <span className="text-xs flex items-center gap-1">
+          <span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: '#8B5CF6' }}/>
+          <span className="text-gray-500">Line items</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── DIVA: JSON viewer ──────────────────────────────────────────────────────────
+function DivaJsonViewer({ divaResult, hoveredField, onHoverField }) {
+  const allFields  = divaResult?.extraction?.fields || [];
+  const scalar     = allFields.filter(f => f.line_item_id === -1);
+  const liFields   = allFields.filter(f => f.line_item_id >= 0);
+  const lastScalar = scalar.length - 1;
+
+  // Group line items by line_item_id
+  const rowMap = {};
+  liFields.forEach((f) => {
+    const id = f.line_item_id;
+    if (!rowMap[id]) rowMap[id] = { _indices: [] };
+    rowMap[id][f.name.replace(/^LineItems\./, '')] = f.value;
+    rowMap[id]._indices.push(allFields.indexOf(f));
+  });
+  const lineItems = Object.values(rowMap);
+
+  const rowBase = 'flex items-baseline gap-0 px-2 py-0.5 rounded cursor-default transition-colors group select-none';
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden bg-gray-950">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">DIVA result</span>
+        <span className="text-xs text-gray-600">
+          {divaResult?.model_used}
+          {divaResult?.timings && (
+            <span className="ml-2">· {(divaResult.timings.total_ms / 1000).toFixed(1)}s</span>
+          )}
+        </span>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 font-mono text-sm leading-relaxed">
+        <span style={{ color: '#9CA3AF' }}>{'{'}</span>
+
+        <div className="pl-4">
+          <span style={{ color: '#7DD3FC' }}>"doc_type"</span>
+          <span style={{ color: '#9CA3AF' }}>: </span>
+          <span style={{ color: '#86EFAC' }}>"{divaResult?.doc_type}"</span>
+          <span style={{ color: '#4B5563' }}>,</span>
+        </div>
+
+        <div className="pl-4">
+          <span style={{ color: '#7DD3FC' }}>"fields"</span>
+          <span style={{ color: '#9CA3AF' }}>: {'{'}</span>
+        </div>
+        <div className="pl-8">
+          {scalar.map((f, i) => {
+            const fieldIdx = allFields.indexOf(f);
+            const isHovered = hoveredField === fieldIdx;
+            return (
+              <div
+                key={i}
+                className={rowBase}
+                style={{ backgroundColor: isHovered ? '#431407' : undefined }}
+                onMouseEnter={() => onHoverField(fieldIdx)}
+                onMouseLeave={() => onHoverField(null)}
+              >
+                <span className="inline-block w-1.5 h-1.5 rounded-full mr-2 flex-shrink-0 self-center"
+                  style={{ backgroundColor: '#F97316' }} />
+                <span style={{ color: '#93C5FD' }}>"{f.name}"</span>
+                <span style={{ color: '#9CA3AF' }}>: </span>
+                <ValueToken value={f.value} />
+                {i < lastScalar && <span style={{ color: '#4B5563' }}>,</span>}
+                <span className="ml-auto text-xs opacity-0 group-hover:opacity-60 transition-opacity"
+                  style={{ color: '#F97316' }}>
+                  conf:{f.confidence}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="pl-4">
+          <span style={{ color: '#9CA3AF' }}>{'}'}</span>
+          {lineItems.length > 0 && <span style={{ color: '#4B5563' }}>,</span>}
+        </div>
+
+        {lineItems.length > 0 && (
+          <>
+            <div className="pl-4 mt-1">
+              <span style={{ color: '#7DD3FC' }}>"line_items"</span>
+              <span style={{ color: '#9CA3AF' }}>: [</span>
+            </div>
+            <div className="pl-8">
+              {lineItems.map((row, ri) => {
+                const { _indices, ...cols } = row;
+                const isRowHovered = _indices.some(idx => hoveredField === idx);
+                const colEntries = Object.entries(cols);
+                return (
+                  <div
+                    key={ri}
+                    className={rowBase + ' flex-wrap'}
+                    style={{ backgroundColor: isRowHovered ? '#2E1065' : undefined }}
+                    onMouseEnter={() => _indices[0] !== undefined && onHoverField(_indices[0])}
+                    onMouseLeave={() => onHoverField(null)}
+                  >
+                    <span style={{ color: '#8B5CF6' }}>●</span>
+                    <span style={{ color: '#9CA3AF' }} className="ml-1">{'{ '}</span>
+                    {colEntries.map(([k, v], ci) => (
+                      <span key={k}>
+                        <span style={{ color: '#C4B5FD' }}>"{k}"</span>
+                        <span style={{ color: '#9CA3AF' }}>: </span>
+                        <ValueToken value={v} />
+                        {ci < colEntries.length - 1 && <span style={{ color: '#4B5563' }}>, </span>}
+                      </span>
+                    ))}
+                    <span style={{ color: '#9CA3AF' }}>{' }'}</span>
+                    {ri < lineItems.length - 1 && <span style={{ color: '#4B5563' }}>,</span>}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="pl-4"><span style={{ color: '#9CA3AF' }}>]</span></div>
+          </>
+        )}
+
+        <span style={{ color: '#9CA3AF' }}>{'}'}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Comparison view ────────────────────────────────────────────────────────────
+function StatPill({ label, value, color }) {
+  return (
+    <div className="flex flex-col items-center px-3 py-1.5 rounded-lg" style={{ backgroundColor: color + '15' }}>
+      <span className="text-xs font-mono font-bold" style={{ color }}>{value}</span>
+      <span className="text-xs text-gray-400 mt-0.5">{label}</span>
+    </div>
+  );
+}
+
+function ComparisonView({ imageB64, ourSchema, ourResult, ourTimings, divaResult, onBack, onGPTCompare, onGeminiCompare, gptPhase, geminiPhase, ourLabel, ourLabelColor, ourFieldBboxes }) {
+  const [ourHovered,  setOurHovered]  = useState(null);
+  const [divaHovered, setDivaHovered] = useState(null);
+
+  const divaFields      = divaResult?.extraction?.fields || [];
+  const divaScalar      = divaFields.filter(f => f.line_item_id === -1);
+  const divaLineItemIds = [...new Set(divaFields.filter(f => f.line_item_id >= 0).map(f => f.line_item_id))];
+  const divaTimings     = divaResult?.timings || {};
+
+  const ourFields    = ourResult?.fields || {};
+  const ourFound     = Object.values(ourFields).filter(v => v.value !== null && v.value !== undefined).length;
+  const ourTotal     = Object.keys(ourFields).length;
+  const ourLineItems = ourResult?.line_items?.length ?? 0;
+  const pass1s       = ourTimings?.pass1_ms != null ? (ourTimings.pass1_ms / 1000).toFixed(1) + 's' : '—';
+  const pass2s       = ourTimings?.pass2_ms != null ? (ourTimings.pass2_ms / 1000).toFixed(1) + 's' : '—';
+  const ourTotalS    = (ourTimings?.pass1_ms != null && ourTimings?.pass2_ms != null)
+    ? ((ourTimings.pass1_ms + ourTimings.pass2_ms) / 1000).toFixed(1) + 's' : '—';
+
+  const divaTotalS   = divaTimings.total_ms        != null ? (divaTimings.total_ms / 1000).toFixed(1)        + 's' : '—';
+  const divaModelS   = divaTimings.model_call_ms   != null ? (divaTimings.model_call_ms / 1000).toFixed(1)   + 's' : '—';
+  const divaDetectS  = divaTimings.autodetect_ms   != null ? (divaTimings.autodetect_ms / 1000).toFixed(1)   + 's' : '—';
+
+  return (
+    <div className="flex flex-col h-screen overflow-hidden bg-gray-50">
+      {/* Header — title + back only */}
+      <header className="flex items-center gap-3 px-5 py-2.5 bg-white border-b border-gray-200 shadow-sm flex-shrink-0">
+        <button
+          onClick={onBack}
+          className="text-xs text-gray-500 hover:text-gray-800 px-2 py-1 rounded border border-gray-200 hover:border-gray-400 transition-colors"
+        >
+          ← Back
+        </button>
+        <span className="text-sm font-bold text-gray-800">⚖ Side-by-Side Comparison</span>
+        <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
+          style={{ backgroundColor: (ourLabelColor || '#6366F1') + '20', color: ourLabelColor || '#6366F1' }}>
+          {ourLabel || 'DocAI'}
+        </span>
+        <span className="text-gray-300">vs</span>
+        <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-semibold">DIVA {divaResult?.model_used}</span>
+        <div className="ml-auto flex items-center gap-1.5">
+          <button
+            onClick={onGPTCompare}
+            disabled={gptPhase === 'loading'}
+            className="text-xs px-2.5 py-1 rounded-lg font-semibold text-white bg-green-600 hover:bg-green-700 transition-colors shadow-sm disabled:opacity-50"
+          >
+            {gptPhase === 'loading' ? '⏳ GPT…' : gptPhase === 'done' ? '✓ GPT-4.1' : '⚡ GPT-4.1'}
+          </button>
+          <button
+            onClick={onGeminiCompare}
+            disabled={geminiPhase === 'loading'}
+            className="text-xs px-2.5 py-1 rounded-lg font-semibold text-white bg-blue-600 hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50"
+          >
+            {geminiPhase === 'loading' ? '⏳ Gemini…' : geminiPhase === 'done' ? '✓ Gemini' : '⚡ Gemini'}
+          </button>
+        </div>
+      </header>
+
+      {/* Stats bar — two columns aligned with content below */}
+      <div className="flex flex-shrink-0 border-b border-gray-200 bg-white">
+        {/* Our stats */}
+        <div className="flex items-center gap-2 px-5 py-2 border-r-2" style={{ flex: 1, borderColor: (ourLabelColor || '#6366F1') + '30' }}>
+          <span className="text-xs font-bold mr-1" style={{ color: ourLabelColor || '#6366F1' }}>
+            {ourLabel || 'DocAI'}
+          </span>
+          <StatPill label="Pass 1 (OCR+VLM)"    value={pass1s}   color={ourLabelColor || '#6366F1'} />
+          <StatPill label={ourFieldBboxes ? 'VLM bbox' : 'Pass 2 (LLM)'} value={pass2s} color={ourLabelColor || '#6366F1'} />
+          <StatPill label="Total"                value={ourTotalS} color={ourLabelColor || '#4F46E5'} />
+          <StatPill label="Fields"               value={`${ourFound}/${ourTotal}`} color={ourLabelColor || '#6366F1'} />
+          {ourLineItems > 0 && <StatPill label="Line Items" value={ourLineItems} color="#8B5CF6" />}
+        </div>
+        {/* DIVA stats */}
+        <div className="flex items-center gap-2 px-5 py-2" style={{ flex: 1 }}>
+          <span className="text-xs font-bold text-orange-600 mr-1">DIVA</span>
+          <StatPill label="Autodetect" value={divaDetectS}        color="#F97316" />
+          <StatPill label="Model call" value={divaModelS}         color="#F97316" />
+          <StatPill label="Total"      value={divaTotalS}         color="#EA580C" />
+          <StatPill label="Fields"     value={divaScalar.length}  color="#F97316" />
+          {divaLineItemIds.length > 0 && <StatPill label="Line Items" value={divaLineItemIds.length} color="#8B5CF6" />}
+        </div>
+      </div>
+
+      {/* Two columns */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* ── Left: Our result ── */}
+        <div className="flex flex-col flex-1 overflow-hidden border-r-2 border-indigo-100">
+          {/* Sub-header */}
+          <div className="px-4 py-1.5 border-b flex-shrink-0"
+            style={{ backgroundColor: (ourLabelColor || '#6366F1') + '12', borderColor: (ourLabelColor || '#6366F1') + '30' }}>
+            <span className="text-xs font-bold" style={{ color: ourLabelColor || '#6366F1' }}>
+              {ourLabel ? ourLabel.toUpperCase() : 'SMART EXTRACT V2'}
+            </span>
+            <span className="text-xs ml-2" style={{ color: (ourLabelColor || '#6366F1') + '99' }}>
+              {ourFieldBboxes ? 'field-level bboxes (VLM)' : 'chunk-level region bboxes'}
+            </span>
+          </div>
+          {/* Inner split: doc viewer + json */}
+          <div className="flex flex-1 overflow-hidden">
+            {ourFieldBboxes ? (
+              <DivaDocViewer
+                imageB64={imageB64}
+                fields={ourFieldBboxes}
+                hoveredField={ourHovered}
+                onHoverField={setOurHovered}
+              />
+            ) : (
+              <DocumentViewer
+                imageB64={imageB64}
+                chunks={ourSchema?.layout_chunks || []}
+                hoveredChunk={ourHovered}
+                onHoverChunk={setOurHovered}
+              />
+            )}
+            <div className="flex-1 overflow-hidden">
+              <JsonViewer
+                result={ourResult}
+                schema={ourSchema}
+                hoveredChunk={ourHovered}
+                onHoverChunk={setOurHovered}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right: DIVA result ── */}
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="px-4 py-1.5 bg-orange-50 border-b border-orange-100 flex-shrink-0">
+            <span className="text-xs font-bold text-orange-700">DIVA</span>
+            <span className="text-xs text-orange-400 ml-2">field-level bboxes per value</span>
+          </div>
+          <div className="flex flex-1 overflow-hidden">
+            <DivaDocViewer
+              imageB64={imageB64}
+              fields={divaFields}
+              hoveredField={divaHovered}
+              onHoverField={setDivaHovered}
+            />
+            <div className="flex-1 overflow-hidden">
+              <DivaJsonViewer
+                divaResult={divaResult}
+                hoveredField={divaHovered}
+                onHoverField={setDivaHovered}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── GPT / Gemini config & helpers ────────────────────────────────────────────
+let GPT_ENDPOINT   = "";
+let GPT_API_KEY    = "";
+let GEMINI_API_KEY = "";
+let GEMINI_MODEL   = "gemini-2.0-flash";
+
+fetch('/api/config').then(r => r.json()).then(cfg => {
+  GPT_ENDPOINT   = cfg.gpt_endpoint   || GPT_ENDPOINT;
+  GPT_API_KEY    = cfg.gpt_api_key    || GPT_API_KEY;
+  GEMINI_API_KEY = cfg.gemini_api_key || GEMINI_API_KEY;
+  GEMINI_MODEL   = cfg.gemini_model   || GEMINI_MODEL;
+}).catch(() => {});
+
+function extractPromptsFromDiva(divaResult) {
+  const dbg  = divaResult?.debug_info || divaResult?.debug || {};
+  const msgs = Array.isArray(dbg.messages) ? dbg.messages : [];
+  const system =
+    dbg.system_prompt ??
+    dbg.prompts?.system ??
+    msgs.find(m => m.role === 'system')?.content ??
+    null;
+  const user =
+    dbg.user_prompt ??
+    dbg.prompts?.user ??
+    msgs.find(m => m.role === 'user')?.content ??
+    null;
+  return { system, user };
+}
+
+function normalizeModelOutput(parsed, elapsed_ms) {
+  const EMPTY_BBOX = { left: 0, top: 0, right: 0, bottom: 0 };
+  let fields = [];
+
+  const _bboxFromArray = (arr) => Array.isArray(arr)
+    ? { left: (arr[0]||0)/1000, top: (arr[1]||0)/1000, right: (arr[2]||1000)/1000, bottom: (arr[3]||1000)/1000 }
+    : (arr || EMPTY_BBOX);
+  const _conf = (c) => c === 'high' ? 0.95 : c === 'medium' ? 0.75 : c === 'low' ? 0.5 : (typeof c === 'number' ? c : 0.9);
+
+  if (parsed.extraction?.fields && Array.isArray(parsed.extraction.fields)) {
+    // DIVA native format
+    fields = parsed.extraction.fields;
+  } else if (parsed.pages && Array.isArray(parsed.pages) && parsed.pages.length > 0) {
+    // DIVA schema format returned by GPT/Gemini: {pages:[{key_info_fields, line_items}]}
+    // bbox is [x1,y1,x2,y2] in 0-1000 scale
+    const page = parsed.pages[0];
+    if (page.key_info_fields && typeof page.key_info_fields === 'object') {
+      Object.entries(page.key_info_fields).forEach(([name, data]) => {
+        if (!data || typeof data !== 'object') return;
+        fields.push({ name, value: data.value ?? null, bbox: _bboxFromArray(data.bbox), confidence: _conf(data.confidence), line_item_id: -1 });
+      });
+    }
+    if (page.line_items && Array.isArray(page.line_items)) {
+      page.line_items.forEach((row, rowIdx) => {
+        if (!row || typeof row !== 'object') return;
+        Object.entries(row).forEach(([col, data]) => {
+          if (!data || typeof data !== 'object') return;
+          fields.push({ name: col, value: data.value ?? null, bbox: _bboxFromArray(data.bbox), confidence: _conf(data.confidence), line_item_id: rowIdx });
+        });
+      });
+    }
+  } else if (parsed.fields && Array.isArray(parsed.fields)) {
+    fields = parsed.fields;
+  } else if (parsed.fields && typeof parsed.fields === 'object') {
+    // Our LLM format: {field_name: {value, section, ...}}
+    fields = Object.entries(parsed.fields).map(([name, data]) => ({
+      name,
+      value: typeof data === 'object' ? (data.value ?? null) : (data ?? null),
+      bbox: data?.bbox || EMPTY_BBOX,
+      confidence: data?.confidence ?? 0.99,
+      line_item_id: -1,
+    }));
+    if (Array.isArray(parsed.line_items)) {
+      parsed.line_items.forEach((row, rowIdx) => {
+        Object.entries(row).forEach(([col, val]) => {
+          const v = typeof val === 'object' && val !== null ? (val.value ?? null) : val;
+          fields.push({ name: col, value: v ?? null, bbox: EMPTY_BBOX, confidence: 0.99, line_item_id: rowIdx });
+        });
+      });
+    }
+  } else {
+    // Fallback: generic flat JSON (GPT / Gemini returning their own schema)
+    // Unwrap single-key wrapper like {receipt: {...}} or {invoice: {...}}
+    const SKIP = new Set(['document_type','doc_type','page_count','overall_confidence',
+                          'extraction','pages','extracted_fields','metadata','timings','model_used']);
+    let root = parsed;
+    const topKeys = Object.keys(parsed).filter(k => !SKIP.has(k));
+    if (topKeys.length === 1 && parsed[topKeys[0]] && typeof parsed[topKeys[0]] === 'object' && !Array.isArray(parsed[topKeys[0]])) {
+      root = parsed[topKeys[0]];
+    }
+    const LINE_ITEM_KEYS = ['items', 'line_items', 'rows', 'products', 'entries'];
+    for (const [k, v] of Object.entries(root)) {
+      if (LINE_ITEM_KEYS.includes(k)) continue;
+      if (v === null || v === undefined) {
+        fields.push({ name: k, value: null, bbox: EMPTY_BBOX, confidence: 0.99, line_item_id: -1 });
+      } else if (typeof v !== 'object') {
+        fields.push({ name: k, value: v, bbox: EMPTY_BBOX, confidence: 0.99, line_item_id: -1 });
+      } else if (!Array.isArray(v)) {
+        // Nested object → flatten one level with dot notation
+        for (const [k2, v2] of Object.entries(v)) {
+          if (v2 === null || typeof v2 !== 'object') {
+            fields.push({ name: `${k}.${k2}`, value: v2 ?? null, bbox: EMPTY_BBOX, confidence: 0.99, line_item_id: -1 });
+          }
+        }
+      }
+    }
+    // Line items from any recognised key
+    const lineArr = LINE_ITEM_KEYS.map(k => root[k]).find(a => Array.isArray(a)) || [];
+    lineArr.forEach((row, rowIdx) => {
+      if (typeof row !== 'object' || row === null) return;
+      Object.entries(row).forEach(([col, val]) => {
+        const v = typeof val === 'object' && val !== null ? (val.value ?? null) : val;
+        fields.push({ name: col, value: v ?? null, bbox: EMPTY_BBOX, confidence: 0.99, line_item_id: rowIdx });
+      });
+    });
+  }
+
+  fields = fields.map(f => ({ ...f, line_item_id: f.line_item_id ?? -1 }));
+  return {
+    extraction: {
+      fields,
+      overall_confidence: parsed.extraction?.overall_confidence ?? parsed.overall_confidence ?? 0.99,
+      page_count: parsed.extraction?.page_count ?? parsed.page_count ?? 1,
+    },
+    elapsed_ms,
+  };
+}
+
+async function callGPTWithImage(imageDataUrl, systemPrompt, userPrompt) {
+  const imgB64 = imageDataUrl.includes(',') ? imageDataUrl.split(',')[1] : imageDataUrl;
+  const mimeMatch = imageDataUrl.match(/^data:([^;]+);/);
+  const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+  const messages = [];
+  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+  messages.push({ role: 'user', content: [
+    { type: 'image_url', image_url: { url: `data:${mime};base64,${imgB64}` } },
+    { type: 'text', text: userPrompt || 'Extract all fields from this document as JSON.' },
+  ]});
+  const t0 = Date.now();
+  const resp = await fetch(GPT_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'api-key': GPT_API_KEY },
+    body: JSON.stringify({ messages, response_format: { type: 'json_object' }, max_completion_tokens: 16384 }),
+  });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => resp.statusText);
+    throw new Error(`GPT API ${resp.status}: ${txt.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  const elapsed_ms = Date.now() - t0;
+  const rawContent = data.choices?.[0]?.message?.content || '{}';
+  let parsed;
+  try { parsed = JSON.parse(rawContent); }
+  catch { const m = rawContent.match(/```(?:json)?\s*([\s\S]+?)```/); parsed = m ? JSON.parse(m[1]) : {}; }
+  console.log('[GPT response]', JSON.stringify(parsed, null, 2).slice(0, 800));
+  return normalizeModelOutput(parsed, elapsed_ms);
+}
+
+const _GEMINI_MAX_RETRIES   = 8;
+const _GEMINI_INITIAL_DELAY = 1000;
+
+function _isGeminiRetryable(err) {
+  if (err instanceof SyntaxError) return true;
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return msg.includes('429') || msg.includes('resource exhausted') || msg.includes('throttl') ||
+    msg.includes('503') || msg.includes('unavailable') || msg.includes('econnreset') ||
+    msg.includes('etimedout') || msg.includes('invalid json') || msg.includes('no extracted fields') ||
+    msg.includes('no response content');
+}
+
+async function _getImageDimensions(imageDataUrl) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.width, height: img.height });
+    img.onerror = () => resolve({ width: 1000, height: 1000 });
+    img.src = imageDataUrl;
+  });
+}
+
+async function callGeminiWithImage(imageDataUrl, systemPrompt, userPrompt) {
+  const imgB64 = imageDataUrl.includes(',') ? imageDataUrl.split(',')[1] : imageDataUrl;
+  let mimeType = 'image/png';
+  if (imageDataUrl.startsWith('data:image/jpeg') || imageDataUrl.startsWith('data:image/jpg')) mimeType = 'image/jpeg';
+  if (imageDataUrl.startsWith('data:image/webp')) mimeType = 'image/webp';
+  const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${userPrompt || ''}` : (userPrompt || 'Extract all fields from this document as JSON.');
+  const requestBody = {
+    contents: [{ role: 'user', parts: [
+      { inline_data: { mime_type: mimeType, data: imgB64 } },
+      { text: fullPrompt },
+    ]}],
+    generationConfig: { stopSequences: ['<<END_EXTR>>'] },
+  };
+
+  let parsedResponse = null, extractedFields = [], isV03Format = false;
+  const t0 = Date.now();
+
+  for (let attempt = 0; attempt <= _GEMINI_MAX_RETRIES; attempt++) {
+    try {
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) },
+      );
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => resp.statusText);
+        throw new Error(`Gemini API ${resp.status}: ${txt.slice(0, 200)}`);
+      }
+      const data = await resp.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error('No response content from Gemini');
+      let jsonText = text.trim();
+      if (jsonText.startsWith('```json')) jsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+      else if (jsonText.startsWith('```')) jsonText = jsonText.replace(/^```\s*/, '').replace(/\s*```$/, '');
+      parsedResponse = JSON.parse(jsonText);
+      console.log('[Gemini response]', JSON.stringify(parsedResponse, null, 2).slice(0, 800));
+
+      if (parsedResponse.extracted_fields && Array.isArray(parsedResponse.extracted_fields)) {
+        extractedFields = parsedResponse.extracted_fields; isV03Format = false;
+      } else if (parsedResponse.pages && Array.isArray(parsedResponse.pages) && parsedResponse.pages.length > 0) {
+        isV03Format = true;
+        const page = parsedResponse.pages[0];
+        extractedFields = [];
+        if (page.key_info_fields && typeof page.key_info_fields === 'object') {
+          Object.entries(page.key_info_fields).forEach(([fieldName, fieldData]) => {
+            const conf = fieldData.confidence === 'high' ? 0.95 : fieldData.confidence === 'medium' ? 0.75 : fieldData.confidence === 'low' ? 0.5 : (typeof fieldData.confidence === 'number' ? fieldData.confidence : 0.9);
+            extractedFields.push({ name: fieldName, value: fieldData.value || '', bbox: fieldData.bbox || [0,0,0,0], bbox_2d: fieldData.bbox || [0,0,0,0], confidence: conf, page: 1, line_item_id: -1 });
+          });
+        }
+        if (page.line_items && Array.isArray(page.line_items)) {
+          page.line_items.forEach((lineItem, lineItemIndex) => {
+            if (typeof lineItem === 'object' && lineItem !== null) {
+              Object.entries(lineItem).forEach(([fieldName, fieldData]) => {
+                const conf = fieldData.confidence === 'high' ? 0.95 : fieldData.confidence === 'medium' ? 0.75 : fieldData.confidence === 'low' ? 0.5 : (typeof fieldData.confidence === 'number' ? fieldData.confidence : 0.9);
+                extractedFields.push({ name: fieldName, value: fieldData.value || '', bbox: fieldData.bbox || [0,0,0,0], bbox_2d: fieldData.bbox || [0,0,0,0], confidence: conf, page: 1, line_item_id: lineItemIndex });
+              });
+            }
+          });
+        }
+      } else {
+        // Unknown format — use generic normalizer (handles flat JSON, wrapped objects, etc.)
+        const fallback = normalizeModelOutput(parsedResponse, Date.now() - t0);
+        if (fallback.extraction.fields.length === 0) throw new Error('No extracted fields found in Gemini response');
+        return fallback;  // skip the field-by-field bbox processing below, already normalized
+      }
+      if (!Array.isArray(extractedFields) || extractedFields.length === 0) throw new Error('No extracted fields found in Gemini response');
+      break;
+    } catch (err) {
+      if (attempt === _GEMINI_MAX_RETRIES || !_isGeminiRetryable(err)) throw err;
+      const delay = _GEMINI_INITIAL_DELAY * Math.pow(2, attempt);
+      console.warn(`Gemini attempt ${attempt + 1}/${_GEMINI_MAX_RETRIES + 1} failed, retrying in ${delay}ms…`, err);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+
+  const elapsed_ms  = Date.now() - t0;
+  const imageDims   = await _getImageDimensions(imageDataUrl);
+
+  const fields = extractedFields.map((field, index) => {
+    let bbox = field.bbox || field.bbox_2d || [0,0,0,0];
+    const isPixelCoords = !!field.bbox_2d && Array.isArray(bbox) && (bbox[2] > 1000 || bbox[3] > 1000);
+    let left, top, right, bottom;
+    if (Array.isArray(bbox)) {
+      if (isV03Format && !isPixelCoords) {
+        left = (bbox[0]||0)/1000; top = (bbox[1]||0)/1000; right = (bbox[2]||1000)/1000; bottom = (bbox[3]||1000)/1000;
+      } else if (isPixelCoords) {
+        left = (bbox[0]||0)/imageDims.width; top = (bbox[1]||0)/imageDims.height; right = (bbox[2]||imageDims.width)/imageDims.width; bottom = (bbox[3]||imageDims.height)/imageDims.height;
+      } else {
+        left = (bbox[0]||0)/1000; top = (bbox[1]||0)/1000; right = (bbox[2]||1000)/1000; bottom = (bbox[3]||1000)/1000;
+      }
+    } else if (typeof bbox === 'object' && bbox !== null) {
+      left = bbox.left??0; top = bbox.top??0; right = bbox.right??1; bottom = bbox.bottom??1;
+    } else { left=0; top=0; right=1; bottom=1; }
+    return {
+      name: field.field_name || field.name || `Field_${index}`,
+      value: field.value || '',
+      page: typeof field.page_number === 'number' ? field.page_number : (typeof field.page === 'number' ? field.page : 1),
+      bbox: { left: Math.max(0,Math.min(1,left)), top: Math.max(0,Math.min(1,top)), right: Math.max(0,Math.min(1,right)), bottom: Math.max(0,Math.min(1,bottom)) },
+      confidence: typeof field.confidence === 'number' ? field.confidence : (typeof field.confidence === 'string' ? parseFloat(field.confidence) : 0.99),
+      line_item_id: field.line_item_id !== undefined && field.line_item_id !== null ? Number(field.line_item_id) : -1,
+    };
+  });
+
+  return { extraction: { fields, overall_confidence: parsedResponse?.overall_confidence ?? 0.99, page_count: parsedResponse?.page_count ?? 1 }, elapsed_ms };
+}
+
+// ── PDF page selector ─────────────────────────────────────────────────────────
+function PageSelectScreen({ pages, selectedPage, onSelectPage, onConfirm, onCancel }) {
+  if (!pages) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <LoadingPane message="Loading PDF pages…" sub="Rendering thumbnails" />
+      </div>
+    );
+  }
+  return (
+    <div className="flex-1 flex flex-col items-center justify-start bg-gray-50 overflow-auto p-8">
+      <div className="w-full max-w-3xl">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h2 className="text-lg font-bold text-gray-800">Select a page to process</h2>
+            <p className="text-xs text-gray-400 mt-0.5">{pages.length} page{pages.length !== 1 ? 's' : ''} · click a thumbnail to select</p>
+          </div>
+          <button
+            onClick={onCancel}
+            className="text-xs text-gray-400 hover:text-gray-700 px-3 py-1.5 rounded-lg border border-gray-200 hover:border-gray-400 transition-colors"
+          >
+            ↩ Upload different file
+          </button>
+        </div>
+
+        {/* Thumbnail grid */}
+        <div className="grid grid-cols-4 gap-4 mb-8">
+          {pages.map(p => {
+            const isSelected = selectedPage === p.page_num;
+            return (
+              <button
+                key={p.page_num}
+                onClick={() => onSelectPage(p.page_num)}
+                className={`relative rounded-xl overflow-hidden border-2 transition-all focus:outline-none
+                  ${isSelected
+                    ? 'border-indigo-500 ring-2 ring-indigo-300 shadow-md'
+                    : 'border-gray-200 hover:border-indigo-300 hover:shadow-sm'}`}
+              >
+                <img src={p.thumbnail} alt={`Page ${p.page_num}`} className="w-full h-auto block" />
+                <div className={`absolute bottom-0 inset-x-0 py-1 text-center text-xs font-semibold
+                  ${isSelected ? 'bg-indigo-500 text-white' : 'bg-black/40 text-white'}`}>
+                  Page {p.page_num}
+                </div>
+                {isSelected && (
+                  <div className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center">
+                    <span className="text-white text-xs font-bold">✓</span>
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex justify-end">
+          <button
+            onClick={onConfirm}
+            className="px-6 py-2.5 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm hover:shadow transition-all"
+          >
+            Process page {selectedPage} →
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Field View Screen ─────────────────────────────────────────────────────────
+function FieldViewScreen({ imageB64, result, onBack, onCompare }) {
+  const [hoveredField, setHoveredField] = useState(null);
+  const [comparing, setComparing]       = useState(false);
+
+  const fields      = result?.field_bboxes || [];
+  const scalar      = fields.filter(f => (f.line_item_id ?? -1) === -1);
+  const lineItemIds = [...new Set(fields.filter(f => (f.line_item_id ?? -1) >= 0).map(f => f.line_item_id))];
+  const bboxMs      = result?.metadata?.bbox_ms ?? 0;
+  const bboxS       = bboxMs > 0 ? (bboxMs / 1000).toFixed(1) + 's' : '—';
+
+  // Wrap into the shape ModelComparisonJsonViewer expects
+  const viewerResult = {
+    extraction: { fields, overall_confidence: 0.99, page_count: 1 },
+    elapsed_ms: bboxMs,
+  };
+
+  const handleCompareClick = async () => {
+    if (!onCompare) return;
+    setComparing(true);
+    await onCompare();
+    setComparing(false);
+  };
+
+  return (
+    <div className="flex flex-col h-screen overflow-hidden bg-gray-50">
+      <header className="flex items-center gap-3 px-5 py-2.5 bg-white border-b border-gray-200 shadow-sm flex-shrink-0">
+        <button onClick={onBack}
+          className="text-xs text-gray-500 hover:text-gray-800 px-2 py-1 rounded border border-gray-200 hover:border-gray-400 transition-colors">
+          ← Back
+        </button>
+        <span className="text-sm font-bold text-gray-800">⊞ Field View Extract</span>
+        <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-semibold">VLM bbox</span>
+        <div className="ml-auto flex items-center gap-2">
+          <StatPill label="VLM bbox pass"  value={bboxS}              color="#8B5CF6" />
+          <StatPill label="Fields"         value={scalar.length}      color="#8B5CF6" />
+          {lineItemIds.length > 0 && <StatPill label="Line Items" value={lineItemIds.length} color="#8B5CF6" />}
+          {onCompare && (
+            <button
+              onClick={handleCompareClick}
+              disabled={comparing}
+              className="text-xs px-2.5 py-1 rounded-lg font-semibold text-white
+                         bg-orange-500 hover:bg-orange-600 disabled:opacity-50
+                         transition-colors shadow-sm ml-2">
+              {comparing ? '⏳ Calling DIVA…' : '⚖ Compare with DIVA'}
+            </button>
+          )}
+        </div>
+      </header>
+
+      <div className="flex flex-1 overflow-hidden">
+        <DivaDocViewer
+          imageB64={imageB64}
+          fields={fields}
+          hoveredField={hoveredField}
+          onHoverField={setHoveredField}
+        />
+        <div className="flex-1 overflow-hidden">
+          <ModelComparisonJsonViewer
+            result={viewerResult}
+            modelLabel="Field View result"
+            accentColor="#8B5CF6"
+            hoveredField={hoveredField}
+            onHoverField={setHoveredField}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Chat placeholder ──────────────────────────────────────────────────────────
+function ChatPlaceholder() {
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center p-8" style={{ opacity: 0.4 }}>
+        <span className="text-4xl">💬</span>
+        <p className="text-sm font-semibold text-gray-600">Document Chat</p>
+        <p className="text-xs text-gray-400">RAG-powered chat coming soon</p>
+      </div>
+      <div className="px-5 py-4 border-t border-gray-100 bg-gray-50">
+        <div className="flex gap-2">
+          <input
+            disabled
+            placeholder="Ask about this document…"
+            className="flex-1 px-3 py-2 rounded-lg border border-gray-200 text-sm bg-gray-100 text-gray-400 cursor-not-allowed"
+          />
+          <button disabled className="px-3 py-2 rounded-lg bg-gray-200 text-gray-400 text-sm cursor-not-allowed">
+            Send
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Model comparison JSON viewer (GPT / Gemini) ───────────────────────────────
+function ModelComparisonJsonViewer({ result, modelLabel, accentColor, hoveredField, onHoverField }) {
+  const allFields  = result?.extraction?.fields || [];
+  const scalar     = allFields.filter(f => (f.line_item_id ?? -1) === -1);
+  const liFields   = allFields.filter(f => (f.line_item_id ?? -1) >= 0);
+  const lastScalar = scalar.length - 1;
+  const rowMap = {};
+  liFields.forEach(f => {
+    const id = f.line_item_id;
+    if (!rowMap[id]) rowMap[id] = { _indices: [] };
+    rowMap[id][f.name.replace(/^LineItems\./, '')] = f.value;
+    rowMap[id]._indices.push(allFields.indexOf(f));
+  });
+  const lineItems = Object.values(rowMap);
+  const rowBase = 'flex items-baseline gap-0 px-2 py-0.5 rounded cursor-default transition-colors group select-none';
+  return (
+    <div className="flex flex-col h-full overflow-hidden bg-gray-950">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{modelLabel}</span>
+        <span className="text-xs text-gray-600">
+          {scalar.length} fields
+          {result?.elapsed_ms != null && <span className="ml-2">· {(result.elapsed_ms / 1000).toFixed(1)}s</span>}
+        </span>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 font-mono text-sm leading-relaxed">
+        <span style={{ color: '#9CA3AF' }}>{'{'}</span>
+        <div className="pl-4">
+          <span style={{ color: '#7DD3FC' }}>"fields"</span>
+          <span style={{ color: '#9CA3AF' }}>: {'{'}</span>
+        </div>
+        <div className="pl-8">
+          {scalar.map((f, i) => {
+            const fieldIdx = allFields.indexOf(f);
+            const isHovered = hoveredField === fieldIdx;
+            return (
+              <div key={i} className={rowBase}
+                style={{ backgroundColor: isHovered ? accentColor + '20' : undefined }}
+                onMouseEnter={() => onHoverField(fieldIdx)}
+                onMouseLeave={() => onHoverField(null)}>
+                <span className="inline-block w-1.5 h-1.5 rounded-full mr-2 flex-shrink-0 self-center"
+                  style={{ backgroundColor: accentColor }} />
+                <span style={{ color: '#93C5FD' }}>"{f.name}"</span>
+                <span style={{ color: '#9CA3AF' }}>: </span>
+                <ValueToken value={f.value} />
+                {i < lastScalar && <span style={{ color: '#4B5563' }}>,</span>}
+                <span className="ml-auto text-xs opacity-0 group-hover:opacity-60 transition-opacity"
+                  style={{ color: accentColor }}>
+                  conf:{typeof f.confidence === 'number' ? f.confidence.toFixed(2) : f.confidence}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="pl-4">
+          <span style={{ color: '#9CA3AF' }}>{'}'}</span>
+          {lineItems.length > 0 && <span style={{ color: '#4B5563' }}>,</span>}
+        </div>
+        {lineItems.length > 0 && (
+          <>
+            <div className="pl-4 mt-1">
+              <span style={{ color: '#7DD3FC' }}>"line_items"</span>
+              <span style={{ color: '#9CA3AF' }}>: [</span>
+            </div>
+            <div className="pl-8">
+              {lineItems.map((row, ri) => {
+                const { _indices, ...cols } = row;
+                const isRowHovered = _indices.some(idx => hoveredField === idx);
+                const colEntries = Object.entries(cols);
+                return (
+                  <div key={ri} className={rowBase + ' flex-wrap'}
+                    style={{ backgroundColor: isRowHovered ? accentColor + '15' : undefined }}
+                    onMouseEnter={() => _indices[0] !== undefined && onHoverField(_indices[0])}
+                    onMouseLeave={() => onHoverField(null)}>
+                    <span style={{ color: accentColor }}>●</span>
+                    <span style={{ color: '#9CA3AF' }} className="ml-1">{'{ '}</span>
+                    {colEntries.map(([k, v], ci) => (
+                      <span key={k}>
+                        <span style={{ color: '#C4B5FD' }}>"{k}"</span>
+                        <span style={{ color: '#9CA3AF' }}>: </span>
+                        <ValueToken value={v} />
+                        {ci < colEntries.length - 1 && <span style={{ color: '#4B5563' }}>, </span>}
+                      </span>
+                    ))}
+                    <span style={{ color: '#9CA3AF' }}>{' }'}</span>
+                    {ri < lineItems.length - 1 && <span style={{ color: '#4B5563' }}>,</span>}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="pl-4"><span style={{ color: '#9CA3AF' }}>]</span></div>
+          </>
+        )}
+        <span style={{ color: '#9CA3AF' }}>{'}'}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Model comparison view (DocAI vs GPT/Gemini) ────────────────────
+function ModelComparisonView({ imageB64, ourSchema, ourResult, ourTimings, modelResult, modelLabel, modelColor, divaResult, onBack, onGPTCompare, onGeminiCompare, gptPhase, geminiPhase }) {
+  const [ourHovered,   setOurHovered]   = useState(null);
+  const [modelHovered, setModelHovered] = useState(null);
+
+  const modelFields  = modelResult?.extraction?.fields || [];
+  const modelScalar  = modelFields.filter(f => (f.line_item_id ?? -1) === -1);
+  const modelLineIds = [...new Set(modelFields.filter(f => (f.line_item_id ?? -1) >= 0).map(f => f.line_item_id))];
+
+  const ourFields    = ourResult?.fields || {};
+  const ourFound     = Object.values(ourFields).filter(v => v.value !== null && v.value !== undefined).length;
+  const ourTotal     = Object.keys(ourFields).length;
+  const ourLineItems = ourResult?.line_items?.length ?? 0;
+  const pass1s    = ourTimings?.pass1_ms != null ? (ourTimings.pass1_ms / 1000).toFixed(1) + 's' : '—';
+  const pass2s    = ourTimings?.pass2_ms != null ? (ourTimings.pass2_ms / 1000).toFixed(1) + 's' : '—';
+  const ourTotalS = (ourTimings?.pass1_ms != null && ourTimings?.pass2_ms != null)
+    ? ((ourTimings.pass1_ms + ourTimings.pass2_ms) / 1000).toFixed(1) + 's' : '—';
+  const modelTotalS = modelResult?.elapsed_ms != null ? (modelResult.elapsed_ms / 1000).toFixed(1) + 's' : '—';
+  const modelConf   = modelResult?.extraction?.overall_confidence != null
+    ? modelResult.extraction.overall_confidence.toFixed(2) : '—';
+
+  return (
+    <div className="flex flex-col h-screen overflow-hidden bg-gray-50">
+      <header className="flex items-center gap-3 px-5 py-2.5 bg-white border-b border-gray-200 shadow-sm flex-shrink-0">
+        <button onClick={onBack}
+          className="text-xs text-gray-500 hover:text-gray-800 px-2 py-1 rounded border border-gray-200 hover:border-gray-400 transition-colors">
+          ← Back
+        </button>
+        <span className="text-sm font-bold text-gray-800">⚖ Side-by-Side Comparison</span>
+        <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-semibold">DocAI</span>
+        <span className="text-gray-300">vs</span>
+        <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
+          style={{ backgroundColor: modelColor + '20', color: modelColor }}>
+          {modelLabel}
+        </span>
+        <div className="ml-auto flex items-center gap-1.5">
+          {onGPTCompare && (
+            <button onClick={onGPTCompare} disabled={gptPhase === 'loading'}
+              className="text-xs px-2.5 py-1 rounded-lg font-semibold text-white bg-green-600 hover:bg-green-700 transition-colors shadow-sm disabled:opacity-50">
+              {gptPhase === 'loading' ? '⏳ GPT…' : gptPhase === 'done' ? '✓ GPT-4.1' : '⚡ GPT-4.1'}
+            </button>
+          )}
+          {onGeminiCompare && (
+            <button onClick={onGeminiCompare} disabled={geminiPhase === 'loading'}
+              className="text-xs px-2.5 py-1 rounded-lg font-semibold text-white bg-blue-600 hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50">
+              {geminiPhase === 'loading' ? '⏳ Gemini…' : geminiPhase === 'done' ? '✓ Gemini' : '⚡ Gemini'}
+            </button>
+          )}
+          <span className="text-xs text-gray-400 ml-1">prompts from DIVA · doc: {divaResult?.doc_type}</span>
+        </div>
+      </header>
+
+      <div className="flex flex-shrink-0 border-b border-gray-200 bg-white">
+        <div className="flex items-center gap-2 px-5 py-2 border-r-2 border-indigo-100" style={{ flex: 1 }}>
+          <span className="text-xs font-bold text-indigo-600 mr-1">DocAI</span>
+          <StatPill label="Pass 1 (OCR+VLM)" value={pass1s}             color="#6366F1" />
+          <StatPill label="Pass 2 (LLM)"     value={pass2s}             color="#6366F1" />
+          <StatPill label="Total"             value={ourTotalS}          color="#4F46E5" />
+          <StatPill label="Fields"            value={`${ourFound}/${ourTotal}`} color="#6366F1" />
+          {ourLineItems > 0 && <StatPill label="Line Items" value={ourLineItems} color="#8B5CF6" />}
+        </div>
+        <div className="flex items-center gap-2 px-5 py-2" style={{ flex: 1 }}>
+          <span className="text-xs font-bold mr-1" style={{ color: modelColor }}>{modelLabel}</span>
+          <StatPill label="Latency"    value={modelTotalS}        color={modelColor} />
+          <StatPill label="Fields"     value={modelScalar.length} color={modelColor} />
+          {modelLineIds.length > 0 && <StatPill label="Line Items" value={modelLineIds.length} color={modelColor} />}
+          <StatPill label="Confidence" value={modelConf}          color={modelColor} />
+        </div>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-col flex-1 overflow-hidden border-r-2 border-indigo-100">
+          <div className="px-4 py-1.5 bg-indigo-50 border-b border-indigo-100 flex-shrink-0">
+            <span className="text-xs font-bold text-indigo-700">SMART EXTRACT V2</span>
+            <span className="text-xs text-indigo-400 ml-2">chunk-level region bboxes</span>
+          </div>
+          <div className="flex flex-1 overflow-hidden">
+            <DocumentViewer
+              imageB64={imageB64}
+              chunks={ourSchema?.layout_chunks || []}
+              hoveredChunk={ourHovered}
+              onHoverChunk={setOurHovered}
+            />
+            <div className="flex-1 overflow-hidden">
+              <JsonViewer
+                result={ourResult}
+                schema={ourSchema}
+                hoveredChunk={ourHovered}
+                onHoverChunk={setOurHovered}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="px-4 py-1.5 border-b flex-shrink-0"
+            style={{ backgroundColor: modelColor + '10', borderBottomColor: modelColor + '30', borderBottomWidth: '1px', borderBottomStyle: 'solid' }}>
+            <span className="text-xs font-bold" style={{ color: modelColor }}>{modelLabel.toUpperCase()}</span>
+            <span className="text-xs ml-2" style={{ color: modelColor + 'aa' }}>field-level bboxes per value</span>
+          </div>
+          <div className="flex flex-1 overflow-hidden">
+            <DivaDocViewer
+              imageB64={imageB64}
+              fields={modelFields}
+              hoveredField={modelHovered}
+              onHoverField={setModelHovered}
+            />
+            <div className="flex-1 overflow-hidden">
+              <ModelComparisonJsonViewer
+                result={modelResult}
+                modelLabel={modelLabel + ' result'}
+                accentColor={modelColor}
+                hoveredField={modelHovered}
+                onHoverField={setModelHovered}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Root app ──────────────────────────────────────────────────────────────────
+function App() {
+  const [phase, setPhase]           = useState('idle');
+  const [imageB64, setImageB64]     = useState(null);
+  const [parseData, setParseData]   = useState(null);
+  const [schema, setSchema]         = useState(null);
+  const [result, setResult]         = useState(null);
+  const [divaResult, setDivaResult] = useState(null);
+  const [ourTimings, setOurTimings] = useState(null);  // {pass1_ms, pass2_ms}
+  const [error, setError]           = useState(null);
+  const [hoveredChunk, setHoveredChunk] = useState(null);
+
+  // Right-pane tab state
+  const [rightTab, setRightTab] = useState('extract'); // 'extract' | 'chat'
+
+  // Field view state
+  const [fieldViewResult, setFieldViewResult]       = useState(null);
+  const [comparisonFrom,  setComparisonFrom]         = useState('done'); // 'done' | 'field_view'
+
+  // PDF multi-page state
+  const [pdfPages,      setPdfPages]      = useState(null);
+  const [selectedPage,  setSelectedPage]  = useState(1);
+  const [pdfFile,       setPdfFile]       = useState(null);
+
+  // GPT / Gemini comparison state
+  const [gptResult,    setGptResult]    = useState(null);
+  const [geminiResult, setGeminiResult] = useState(null);
+  const [gptPhase,     setGptPhase]     = useState('idle'); // 'idle'|'loading'|'done'|'error'
+  const [geminiPhase,  setGeminiPhase]  = useState('idle');
+  const [activeModel,  setActiveModel]  = useState(null);   // 'gpt'|'gemini'
+
+  const _runParse = async (file, page = 1) => {
+    setPhase('parsing');
+    setError(null);
+    setResult(null);
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const resp = await fetch(`/api/parse?page=${page}`, { method: 'POST', body: fd });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(detail.detail || resp.statusText);
+      }
+      const data = await resp.json();
+      setImageB64(data.image_b64);
+      setParseData(data);
+      setOurTimings(t => ({ ...t, pass1_ms: data.timings?.pass1_ms }));
+      setSchema(JSON.parse(JSON.stringify(data.vlm_schema)));
+      setPhase('schema_review');
+    } catch (e) {
+      setError(e.message);
+      setPhase('idle');
+    }
+  };
+
+  const handleUpload = useCallback(async (file) => {
+    if (file.name.toLowerCase().endsWith('.pdf')) {
+      // PDF: render thumbnails first
+      setPdfFile(file);
+      setPhase('page_select');
+      setError(null);
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const resp = await fetch('/api/pdf-pages', { method: 'POST', body: fd });
+        if (!resp.ok) {
+          const detail = await resp.json().catch(() => ({ detail: resp.statusText }));
+          throw new Error(detail.detail || resp.statusText);
+        }
+        const data = await resp.json();
+        setPdfPages(data.pages);
+        setSelectedPage(1);
+      } catch (e) {
+        setError(e.message);
+        setPhase('idle');
+      }
+      return;
+    }
+    // Image: proceed directly
+    await _runParse(file, 1);
+  }, []);
+
+  const handlePageConfirm = useCallback(async () => {
+    await _runParse(pdfFile, selectedPage);
+  }, [pdfFile, selectedPage]);
+
+  const handleExtract = useCallback(async () => {
+    setPhase('extracting');
+    setError(null);
+
+    try {
+      const resp = await fetch('/api/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          elements:         parseData.elements,
+          abbyy_plain_text: parseData.abbyy_plain_text,
+          vlm_schema:       schema,
+        }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(detail.detail || resp.statusText);
+      }
+      const data = await resp.json();
+      setResult(data);
+      setOurTimings(t => ({ ...t, pass2_ms: data.metadata?.pass2_ms }));
+      setPhase('done');
+    } catch (e) {
+      setError(e.message);
+      setPhase('schema_review');
+    }
+  }, [parseData, schema]);
+
+  const handleFieldViewExtract = useCallback(async () => {
+    setPhase('extracting');
+    setError(null);
+    try {
+      const resp = await fetch('/api/extract-field-view', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          elements:         parseData?.elements         || {},
+          abbyy_plain_text: parseData?.abbyy_plain_text || null,
+          vlm_schema:       schema,
+          image_b64:        imageB64,
+        }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(detail.detail || resp.statusText);
+      }
+      const data = await resp.json();
+      setFieldViewResult(data);
+      setPhase('field_view');
+    } catch (e) {
+      setError(e.message);
+      setPhase('schema_review');
+    }
+  }, [schema, imageB64, parseData]);
+
+  const handleReset = () => {
+    setPhase('idle');
+    setImageB64(null);
+    setParseData(null);
+    setSchema(null);
+    setResult(null);
+    setDivaResult(null);
+    setOurTimings(null);
+    setError(null);
+    setHoveredChunk(null);
+    setGptResult(null);
+    setGeminiResult(null);
+    setGptPhase('idle');
+    setGeminiPhase('idle');
+    setActiveModel(null);
+    setRightTab('extract');
+    setFieldViewResult(null);
+    setComparisonFrom('done');
+    setPdfPages(null);
+    setSelectedPage(1);
+    setPdfFile(null);
+  };
+
+  const handleCompare = useCallback(async () => {
+    setPhase('comparing');
+    setError(null);
+    try {
+      const resp = await fetch('/api/compare-diva', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_b64: imageB64 }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(detail.detail || resp.statusText);
+      }
+      const data = await resp.json();
+      console.log('[DIVA response]', JSON.stringify(data, null, 2));
+      setDivaResult(data);
+      setComparisonFrom('done');
+      setPhase('comparison');
+    } catch (e) {
+      setError(e.message);
+      setPhase('done');
+    }
+  }, [imageB64]);
+
+  // Same as handleCompare but uses fieldViewResult as "our" side in ComparisonView
+  const handleFieldViewCompareDiva = useCallback(async () => {
+    setError(null);
+    try {
+      const resp = await fetch('/api/compare-diva', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_b64: imageB64 }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(detail.detail || resp.statusText);
+      }
+      const data = await resp.json();
+      console.log('[DIVA response from field view]', JSON.stringify(data, null, 2));
+      setDivaResult(data);
+      // Promote fieldViewResult as "our" result — normalize line_items to plain {col: value}
+      // (field view returns {col: {value, bbox, confidence}} which JsonViewer can't render directly)
+      const normalized = {
+        ...fieldViewResult,
+        line_items: (fieldViewResult?.line_items || []).map(row =>
+          Object.fromEntries(Object.entries(row).map(([k, v]) => [k, typeof v === 'object' && v !== null ? v.value : v]))
+        ),
+      };
+      setResult(normalized);
+      setOurTimings(t => ({ ...t, pass2_ms: fieldViewResult?.metadata?.bbox_ms }));
+      setComparisonFrom('field_view');
+      setPhase('comparison');
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [imageB64, fieldViewResult]);
+
+  const handleGPTCompare = useCallback(async () => {
+    if (gptPhase === 'done') { setActiveModel('gpt'); setPhase('model_comparison'); return; }
+    if (gptPhase === 'loading') return;
+    setGptPhase('loading');
+    setError(null);
+    const { system, user } = extractPromptsFromDiva(divaResult);
+    const sysPrompt = system || `You are a document extraction AI. Extract all fields from this ${divaResult?.doc_type || 'document'}.`;
+    const usrPrompt = user   || 'Extract all visible fields from this document image and return structured JSON.';
+    try {
+      const out = await callGPTWithImage(imageB64, sysPrompt, usrPrompt);
+      setGptResult(out);
+      setGptPhase('done');
+      setActiveModel('gpt');
+      setPhase('model_comparison');
+    } catch (e) {
+      setGptPhase('error');
+      setError(`GPT comparison failed: ${e.message}`);
+    }
+  }, [divaResult, imageB64, gptPhase]);
+
+  const handleGeminiCompare = useCallback(async () => {
+    if (geminiPhase === 'done') { setActiveModel('gemini'); setPhase('model_comparison'); return; }
+    if (geminiPhase === 'loading') return;
+    setGeminiPhase('loading');
+    setError(null);
+    const { system, user } = extractPromptsFromDiva(divaResult);
+    const sysPrompt = system || `You are a document extraction AI. Extract all fields from this ${divaResult?.doc_type || 'document'}.`;
+    const usrPrompt = user   || 'Extract all visible fields from this document image and return structured JSON.';
+    try {
+      const out = await callGeminiWithImage(imageB64, sysPrompt, usrPrompt);
+      setGeminiResult(out);
+      setGeminiPhase('done');
+      setActiveModel('gemini');
+      setPhase('model_comparison');
+    } catch (e) {
+      setGeminiPhase('error');
+      setError(`Gemini comparison failed: ${e.message}`);
+    }
+  }, [divaResult, imageB64, geminiPhase]);
+
+  const chunks = schema?.layout_chunks || [];
+
+  return (
+    <div className="min-h-screen flex flex-col bg-gray-50">
+      {/* Header */}
+      <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-6 shadow-sm">
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="text-lg">🔬</span>
+          <span className="font-bold text-gray-800">DocAI</span>
+          <span className="text-xs px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded font-semibold">V2</span>
+        </div>
+
+        <div className="flex-1 max-w-lg">
+          <Stepper phase={phase} />
+        </div>
+
+        {phase !== 'idle' && phase !== 'page_select' && (
+          <button
+            onClick={handleReset}
+            className="text-xs text-gray-400 hover:text-gray-700 px-3 py-1.5 rounded-lg
+                       border border-gray-200 hover:border-gray-400 transition-colors flex-shrink-0"
+          >
+            ↩ New document
+          </button>
+        )}
+
+        {/* Model badge */}
+        <div className="text-xs text-gray-400 hidden md:block flex-shrink-0">
+          {schema?.document_type && (
+            <span className="px-2 py-0.5 bg-gray-100 rounded font-mono">
+              {schema.document_type}
+            </span>
+          )}
+        </div>
+      </header>
+
+      {/* Error bar */}
+      {error && (
+        <div className="bg-red-50 border-b border-red-200 px-6 py-2 flex items-center gap-2">
+          <span className="text-red-500 text-sm">⚠</span>
+          <span className="text-red-700 text-sm flex-1">{error}</span>
+          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-600 text-lg leading-none">×</button>
+        </div>
+      )}
+
+      {/* Main content */}
+      <main className="flex-1 flex overflow-hidden" style={{ height: 'calc(100vh - 57px)' }}>
+        {phase === 'page_select' ? (
+          <PageSelectScreen
+            pages={pdfPages}
+            selectedPage={selectedPage}
+            onSelectPage={setSelectedPage}
+            onConfirm={handlePageConfirm}
+            onCancel={handleReset}
+          />
+        ) : phase === 'field_view' ? (
+          <FieldViewScreen
+            imageB64={imageB64}
+            result={fieldViewResult}
+            onBack={() => setPhase('done')}
+            onCompare={handleFieldViewCompareDiva}
+          />
+        ) : phase === 'model_comparison' ? (
+          <ModelComparisonView
+            imageB64={imageB64}
+            ourSchema={schema}
+            ourResult={result}
+            ourTimings={ourTimings}
+            modelResult={activeModel === 'gpt' ? gptResult : geminiResult}
+            modelLabel={activeModel === 'gpt' ? 'GPT-4.1-mini' : 'Gemini 3 Flash'}
+            modelColor={activeModel === 'gpt' ? '#22C55E' : '#3B82F6'}
+            divaResult={divaResult}
+            onBack={() => setPhase('comparison')}
+            onGPTCompare={handleGPTCompare}
+            onGeminiCompare={handleGeminiCompare}
+            gptPhase={gptPhase}
+            geminiPhase={geminiPhase}
+          />
+        ) : phase === 'comparison' ? (
+          <ComparisonView
+            imageB64={imageB64}
+            ourSchema={schema}
+            ourResult={result}
+            ourTimings={ourTimings}
+            divaResult={divaResult}
+            onBack={() => setPhase(comparisonFrom === 'field_view' ? 'field_view' : 'done')}
+            onGPTCompare={handleGPTCompare}
+            onGeminiCompare={handleGeminiCompare}
+            gptPhase={gptPhase}
+            geminiPhase={geminiPhase}
+            ourLabel={comparisonFrom === 'field_view' ? '⊞ Field View (VLM)' : 'DocAI'}
+            ourLabelColor={comparisonFrom === 'field_view' ? '#8B5CF6' : '#6366F1'}
+            ourFieldBboxes={comparisonFrom === 'field_view' ? fieldViewResult?.field_bboxes : null}
+          />
+        ) : phase === 'idle' ? (
+          <UploadZone onUpload={handleUpload} />
+        ) : (
+          <div className="flex flex-1 overflow-hidden">
+            {/* Left: Document viewer */}
+            {imageB64 && (
+              <DocumentViewer
+                imageB64={imageB64}
+                chunks={chunks}
+                hoveredChunk={hoveredChunk}
+                onHoverChunk={setHoveredChunk}
+              />
+            )}
+
+            {/* Right: Context panel */}
+            <div className="flex flex-col bg-white overflow-hidden" style={{ flex: 1 }}>
+              {/* Panel header */}
+              <div className="flex items-center justify-between px-5 py-2.5 border-b border-gray-100 bg-gray-50">
+                {(phase === 'schema_review' || phase === 'extracting') ? (
+                  <div className="flex gap-1">
+                    {[['extract', '▶ Extract'], ['chat', '💬 Chat']].map(([tab, label]) => (
+                      <button
+                        key={tab}
+                        onClick={() => setRightTab(tab)}
+                        disabled={phase === 'extracting'}
+                        className={`text-xs px-3 py-1 rounded-md font-semibold transition-colors
+                          ${rightTab === tab
+                            ? 'bg-indigo-600 text-white'
+                            : 'text-gray-400 hover:text-gray-700 disabled:pointer-events-none'}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                    {phase === 'parsing'   && 'Analyzing document…'}
+                    {phase === 'comparing' && 'Calling DIVA…'}
+                    {phase === 'done'      && 'Extraction Results'}
+                  </span>
+                )}
+                {phase === 'done' && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setPhase('schema_review')}
+                      className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                    >
+                      ← Edit schema
+                    </button>
+                    <button
+                      onClick={handleCompare}
+                      className="text-xs px-2.5 py-1 rounded-lg font-semibold text-white
+                                 bg-orange-500 hover:bg-orange-600 transition-colors shadow-sm"
+                    >
+                      ⚖ Compare with DIVA
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Panel body */}
+              <div className="flex-1 overflow-hidden">
+                {phase === 'parsing' && (
+                  <LoadingPane
+                    message="Running ABBYY OCR + VLM schema detection…"
+                    sub="Both passes run concurrently — this takes ~15–30s"
+                  />
+                )}
+                {phase === 'comparing' && (
+                  <LoadingPane
+                    message="Calling DIVA API…"
+                    sub="Sending image for extraction"
+                  />
+                )}
+                {(phase === 'schema_review' || phase === 'extracting') && schema && (
+                  rightTab === 'extract' ? (
+                    <SchemaEditor
+                      schema={schema}
+                      onChange={setSchema}
+                      onExtract={handleExtract}
+                      onFieldViewExtract={handleFieldViewExtract}
+                      extracting={phase === 'extracting'}
+                      hoveredChunk={hoveredChunk}
+                      onHoverChunk={setHoveredChunk}
+                    />
+                  ) : (
+                    <ChatPlaceholder />
+                  )
+                )}
+                {phase === 'done' && result && (
+                  <JsonViewer
+                    result={result}
+                    schema={schema}
+                    hoveredChunk={hoveredChunk}
+                    onHoverChunk={setHoveredChunk}
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
